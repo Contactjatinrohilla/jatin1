@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.00                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.01                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -27,8 +27,8 @@
 //|  On a UTC+2 winter / UTC+3 summer server, London 08:00 = 10:00    |
 //|  server all year. See docs/GUIDE.md for the full time table.      |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.00"
-#property version   "7.00"
+#property copyright "XAUUSD Simple Breakout v7.01"
+#property version   "7.01"
 
 #include <Trade\Trade.mqh>
 
@@ -53,6 +53,9 @@ input double InpRiskPct         = 1.0;      // Risk % of balance per trade
 input int    InpMaxTradesDay    = 2;        // Max trades per day (both setups together)
 input double InpMaxDailyLossPct = 2.5;      // Close all + stop for the day at this loss % (0 = off)
 input ulong  InpMagic           = 700000;   // Magic base (A = +1, B = +2)
+
+input group "=== 4. Optimisation (Strategy Tester only) ==="
+input int    InpMinTrades       = 100;      // Score = 0 below this many trades (too few to trust)
 
 #define SET_PDH   0
 #define SET_RANGE 1
@@ -447,5 +450,23 @@ void OnTick()
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
   {
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD) g_recount = true;
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//|  Optimisation score - select "Custom max" in the tester.          |
+//|  Rewards a steady edge, not the biggest profit:                   |
+//|    score = (profit factor - 1) x sqrt(trades) / max equity DD %   |
+//|  0 when there are too few trades, no profit, or PF <= 1, so a     |
+//|  handful of lucky trades or a high-risk setting cannot win.       |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   double trades = TesterStatistics(STAT_TRADES);
+   double profit = TesterStatistics(STAT_PROFIT);
+   double pf     = TesterStatistics(STAT_PROFIT_FACTOR);
+   double ddPct  = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+   if(trades < InpMinTrades || profit <= 0 || pf <= 1.0) return 0.0;
+   return (pf - 1.0) * MathSqrt(trades) / MathMax(ddPct, 1.0);
   }
 //+------------------------------------------------------------------+

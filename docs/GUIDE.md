@@ -126,3 +126,25 @@ spread padding and simulated spread (the converter handles spread now).
 4. **Unseen data.** Run the chosen setting on 2025–2026 without changing anything. If the profit factor stays
    above about 1.2 and the drawdown stays within your prop limits, it is worth trading on a demo account.
 5. **Demo forward test** for 4–8 weeks, then compare its trades with the tester run for the same dates.
+
+## 7. Optimising without fooling yourself
+
+Lesson from `Final_optimization_2` (v5.30, 2021–2026, +$113,640 at only **23% real ticks**): the same PDH setups
+on the same days made **+$15,654 per lot** there and **−$10,325 per lot** in the 100%-real-tick test. Every dollar
+of profit came from trades closed within 60 seconds. With a 10-point trail, a backtest result mostly depends on how
+the price moves inside each 1-minute candle, and generated ticks invent exactly that.
+
+Rules:
+1. **History quality must say 100% real ticks.** On anything less, the result is not a test of the strategy.
+   For older years, use the Dukascopy custom symbol (section 4).
+2. **Use exits that don't depend on how price moves inside one candle**: SL of several dollars, TP ≥ 1.5R,
+   breakeven ≥ 1R, no micro-trail. A setting whose median trade lasts a few seconds is not a strategy.
+3. **Optimise with `Custom max`** (the v7 EA's `OnTester` score = (PF − 1) × √trades ÷ max DD %). It ignores
+   settings with fewer than `InpMinTrades` trades, PF ≤ 1 or a loss.
+4. **Small grid, stable area:** `InpSL_USD` 3–15 step 1, `InpRR` 1.5–3 step 0.5, `InpBE_R` 0 / 1 / 1.5. Choose a
+   setting whose neighbours also score well, not the single top result.
+5. **Walk-forward:** optimise on 2023–2024, then run the chosen setting unchanged on 2025–2026.
+6. **Stress test:** rerun the chosen setting with a wider spread (`--spread 0.40`) and on a second data feed
+   (broker XAUUSD vs Dukascopy). The result has to stay profitable in all of them.
+7. **Fixed lots hide risk.** With a fixed 0.5 lot, drawdown % shrinks as the balance grows. Judge drawdown with
+   risk-% sizing, or in $ against the starting balance.

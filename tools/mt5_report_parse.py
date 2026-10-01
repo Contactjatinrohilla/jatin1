@@ -15,8 +15,9 @@ def _t(s):
     return dt.datetime.strptime(s, "%Y.%m.%d %H:%M:%S")
 
 
-def parse(path):
-    ws = openpyxl.load_workbook(path, data_only=False).active
+def parse(path, sheet=None):
+    wb = openpyxl.load_workbook(path, data_only=False)
+    ws = wb[sheet] if sheet else wb.active
     rows = [[c.value for c in r] for r in ws.iter_rows()]
     info, inputs, results = {}, [], {}
     sec = None
