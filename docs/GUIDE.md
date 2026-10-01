@@ -98,7 +98,7 @@ and MT5 tick exports (`<DATE> <TIME> <BID> <ASK>`). `.gz` files work too.
 3. Strategy Tester: symbol `XAUUSD_DK`, modelling **"Every tick based on real ticks"**, deposit and leverage the same
    as your account.
 
-## 5. The simple v7 EA (`ea/XAUUSD_Simple_Breakout_v7.mq5`)
+## 5. The simple v7 EA (`ea/XAUUSD_Simple_Breakout_v7.mq5`, base rules - see section 8 for v7.10 options)
 
 The whole strategy:
 
@@ -148,3 +148,59 @@ Rules:
    (broker XAUUSD vs Dukascopy). The result has to stay profitable in all of them.
 7. **Fixed lots hide risk.** With a fixed 0.5 lot, drawdown % shrinks as the balance grows. Judge drawdown with
    risk-% sizing, or in $ against the starting balance.
+
+## 8. v7.10: editable entries, filters and Custom max
+
+All new inputs default to the v7.01 behaviour, so you can switch on one change at a time and compare.
+
+### Entry (section 2 of the inputs)
+| Input | Options | What it tests |
+|---|---|---|
+| `InpEntryMode` | 0 STOP · 1 STOP-LIMIT · 2 CLOSE · 3 RETEST | How to enter a breakout (optimisable) |
+| `InpMaxSlip_USD` | 0.50 | STOP-LIMIT: maximum fill distance past the level. A $5 news-spike fill is skipped instead of taken |
+| `InpConfirmTF` | M5 | Candle used by CLOSE / RETEST |
+| `InpMaxChase_USD` | 3.00 | CLOSE / RETEST: ignore a close more than this past the level (don't chase spikes) |
+| `InpDirection` | Both / Buy / Sell | One-direction test |
+| `InpBuffer_USD` | 0.00 | Entry this far beyond the level |
+
+- **STOP**: the original. Fills instantly, but can fill far away in a spike.
+- **STOP-LIMIT**: the same trigger, but the fill is capped. If the broker doesn't allow stop-limits, the EA warns
+  and uses plain stops.
+- **CLOSE**: waits for an M5 (or `InpConfirmTF`) candle to close beyond the level, then buys/sells at market.
+  This avoids wick-only fake breakouts.
+- **RETEST**: after that close, places a limit order back at the level, so the entry is at the level instead of
+  after the move.
+
+### Filters (section 4)
+| Input | Example | Effect |
+|---|---|---|
+| `InpTradeMon` … `InpTradeFri` | false on Monday | Skip weekdays |
+| `InpNoTrade1` / `InpNoTrade2` | `15:15-16:00` | No new entries in the window (US data = 15:30 server). `InpWindowCancel` deletes pending orders there; they're placed again after the window. `InpWindowClose` also closes trades |
+| `InpNoTradeDates` | `2026.02.06,2026.03.06` | Skip whole days (NFP, CPI, FOMC). Format `yyyy.mm.dd` |
+| `InpMinLevelRange_USD` / `InpMaxLevelRange_USD` | 5 / 60 | Skip a setup when its high-low range is too small or too wide |
+
+### Custom max (section 6)
+In the Strategy Tester choose **Optimisation: Custom max**, then pick the target with `InpScore`:
+
+| `InpScore` | Maximises |
+|---|---|
+| 0 Robust (default) | (PF − 1) × √trades ÷ max DD % |
+| 1 Profit factor | PF |
+| 2 Recovery factor | net profit ÷ max drawdown |
+| 3 Net profit | profit |
+| 4 Sharpe ratio | Sharpe |
+| 5 Average R | expectancy per trade in R |
+| 6 Return / DD | return % ÷ max DD % |
+
+Every target is set to **0** when the run has fewer than `InpMinTrades` trades, isn't profitable, has max DD above
+`InpScoreMaxDD` %, or has any single trade worse than `−InpScoreWorstR` R. The last check rules out settings that
+only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
+
+### Testing the custom entries step by step
+1. Load `ea/presets/v7_10_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
+   `InpEntryMode` 0–3, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (640 combinations).
+2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
+3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
+   also score well.
+4. Run the best two or three settings on 2025–2026 without changing anything.
+5. Repeat step 4 with `InpNoTrade1 = 15:15-16:00` to see whether avoiding US data helps.
