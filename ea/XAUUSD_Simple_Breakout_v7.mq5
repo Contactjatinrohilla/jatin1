@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.11                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.12                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -34,8 +34,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.11"
-#property version   "7.11"
+#property copyright "XAUUSD Simple Breakout v7.12"
+#property version   "7.12"
 
 #include <Trade\Trade.mqh>
 
@@ -339,6 +339,10 @@ void NewDay(datetime day)
    bool newsDay = (InpNoTradeDates != "" && StringFind(InpNoTradeDates, date) >= 0);
    g_dayBlocked = !dayOn[dt.day_of_week] || newsDay;
 
+   // Yesterday's close time was due but trades are still open: the market closed early
+   // (holiday) before the close tick arrived - close them now.
+   bool missedClose = (g_closeToday >= 0 && OurPositions() > 0);
+
    // Force-close time for today: per CloseMode, never later than 5 min before the session ends.
    g_closeToday = -1;
    if(g_tClose >= 0 && (InpCloseMode == CLOSE_DAILY || (InpCloseMode == CLOSE_FRIDAY && dt.day_of_week == 5)))
@@ -349,6 +353,8 @@ void NewDay(datetime day)
          PrintFormat("NOTE: trade session ends %02d:%02d - closing at %02d:%02d instead of %s",
                      sessEnd / 60, sessEnd % 60, g_closeToday / 60, g_closeToday % 60, InpCloseTime);
      }
+
+   if(missedClose) ClosePositions("close time was missed - market closed early");
 
    PrintFormat("=== %s | trades today=%d | PDH %s | RANGE %s%s", date, g_tradesToday,
                g_used[SET_PDH] ? "used" : "waiting", g_used[SET_RANGE] ? "used" : "waiting",
