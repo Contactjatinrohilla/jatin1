@@ -1,0 +1,128 @@
+# XAUUSD breakout EA: time, data and testing guide
+
+## 1. The gold trading day in UTC
+
+Most gold brokers and prop firms run their MT5 server on **UTC+2 in winter and UTC+3 in US summer time**.
+That makes the server clock = **New York time + 7 hours**, so the daily candle closes at 17:00 New York.
+Your Dukascopy data is in **UTC**, and that's why the times have to be shifted (see section 4).
+
+US summer time: 2nd Sunday of March → 1st Sunday of November.
+UK summer time: last Sunday of March → last Sunday of October.
+India (IST = UTC+5:30) has no daylight saving time.
+
+| Event | New York | **Server** (UTC+2/+3) | UTC summer | UTC winter | IST summer | IST winter |
+|---|---|---|---|---|---|---|
+| Daily break (gold closed) | 17:00–18:00 | **00:00–01:00** | 21:00–22:00 | 22:00–23:00 | 02:30–03:30 | 03:30–04:30 |
+| New gold day opens | 18:00 | **01:00** | 22:00 | 23:00 | 03:30 | 04:30 |
+| Tokyo session (09:00–18:00 Tokyo) | — | 03:00–12:00 / 02:00–11:00 | 00:00–09:00 | 00:00–09:00 | 05:30–14:30 | 05:30–14:30 |
+| **London open** (08:00 London) | 03:00 | **10:00** | 07:00 | 08:00 | 12:30 | 13:30 |
+| London PM gold fix (15:00 London) | 10:00 | **17:00** | 14:00 | 15:00 | 19:30 | 20:30 |
+| **London close** (16:00 / 16:30 London) | 11:00 | **18:00 / 18:30** | 15:00 | 16:00 | 20:30 | 21:30 |
+| New York open (08:00 NY) | 08:00 | **15:00** | 12:00 | 13:00 | 17:30 | 18:30 |
+| US data releases (08:30 NY) | 08:30 | **15:30** | 12:30 | 13:30 | 18:00 | 19:00 |
+| London / NY overlap | 08:00–11:00 | **15:00–18:00** | 12:00–15:00 | 13:00–16:00 | 17:30–20:30 | 18:30–21:30 |
+
+**Useful fact:** on a UTC+2/+3 server, London 08:00 is **10:00 server time all year**. The exceptions are about
+3 weeks in March and 1 week in late October, when the US and UK clocks change on different dates. During those
+weeks London opens at 09:00 server time. (In 2026: 8–29 March and 25 October–1 November.)
+
+Check your own broker: compare the Market Watch clock with the real UTC time. If the server is 2 or 3 hours ahead
+of UTC, depending on the season, this table applies.
+
+## 2. What the "London range" is
+
+The London range is the **highest high and lowest low between London open and London close** on the current day.
+
+| | London local | Server (UTC+2/+3) | UTC (summer / winter) |
+|---|---|---|---|
+| Range starts | 08:00 | 10:00 | 07:00 / 08:00 |
+| Range ends | 16:00 | 18:00 | 15:00 / 16:00 |
+
+After the range ends, a BUY STOP goes above the range high and a SELL STOP below the range low.
+
+**What your old v6.03 actually did:** `InpLondonOpenUTC=8`, `InpLondonCloseUTC=16`, `TZ_FIXED`, offset `+3`, so it
+always used server 11:00–19:00. On a real broker that is **London 09:00–17:00**, an hour late, because "8 UTC" is
+09:00 London time in summer.
+**In the Strategy Tester with raw Dukascopy data (UTC timestamps)** the same setting gave UTC 11:00–19:00, which is
+**London 12:00–20:00**. That is the wrong session entirely, and the PDH/PDL levels were wrong too, because the D1
+candles were cut at UTC midnight and included a small Sunday candle. Your backtests may not have matched the live
+account for this reason alone.
+
+The v7 EA uses server time directly: `InpRangeStart=10:00`, `InpRangeEnd=18:00`. To reproduce the old
+behaviour, use `11:00` and `19:00`.
+
+## 3. 2-digit vs 3-digit prices
+
+| Source | Example price | 1 point | "120 points" |
+|---|---|---|---|
+| Typical broker / prop firm | 2650.**13** | $0.01 | **$1.20** |
+| Dukascopy | 2650.**125** | $0.001 | **$0.12** |
+
+The same EA input means a **10× different stop loss** depending on the data. If you backtested v6.03
+(`InpSL_Pts=120`, trail 10) on 3-digit Dukascopy data, the backtest used a **$0.12 stop and a $0.01 trailing
+distance**, which can't happen on your live account.
+
+Two fixes, use both:
+1. The converter rounds the data to **2 digits**, the same as your broker.
+2. The v7 EA uses **USD price distance** inputs (`InpSL_USD = 5.00` = a $5 move), so the number of digits makes
+   no difference. At startup it prints the conversion, for example `SL $5.00 = 500 points`.
+
+## 4. Fixed spread from Dukascopy data
+
+Your prop firm's spread is 12–47 points (2 digits) = **$0.12–$0.47**. To test with a fixed 25 points = **$0.25**:
+
+```
+python3 tools/dukascopy_to_mt5.py  XAUUSD_dukascopy.csv  XAUUSD_mt5.csv  --spread 0.25 --digits 2
+```
+
+The converter:
+- takes the Dukascopy mid price and sets `bid = mid − 0.125` and `ask = bid + 0.25`, so every tick has a $0.25 spread
+- rounds to 2 digits
+- shifts UTC to server time (UTC+2 winter / UTC+3 US summer), so D1 candles, PDH/PDL and session times match the broker
+- prints the **original** Dukascopy spread statistics, so you can see how wide it was
+
+Other options: `--spread 0` keeps the original spread. `--tz none` is for files that are already in server time,
+such as ticks exported from an MT5 custom symbol (detected automatically). Use `--tz fixed --offset 2` for a broker
+on a fixed offset. If your account charges commission, add its price equivalent to the spread to keep testing
+simple. For example, $7 per lot round-trip ≈ $0.07, so use `--spread 0.32`.
+
+Input formats: the Dukascopy CSV export (`Gmt time,Ask,Bid,...`), dukascopy-node (`timestamp,askPrice,bidPrice`),
+and MT5 tick exports (`<DATE> <TIME> <BID> <ASK>`). `.gz` files work too.
+
+### Import into MT5
+1. MT5 → **View → Symbols → Create Custom Symbol**. In **Copy from**, choose your broker's **XAUUSD** (this copies
+   contract size 100, margin and profit settings). Name it e.g. `XAUUSD_DK`, set **Digits = 2**, click OK.
+   If you already have a 3-digit Dukascopy symbol, make a new one. Don't mix the two.
+2. Select the symbol → **Ticks** tab → **Import Ticks** → pick `XAUUSD_mt5.csv`. Check that the column preview shows
+   Date / Time / Bid / Ask, then click Import.
+3. Strategy Tester: symbol `XAUUSD_DK`, modelling **"Every tick based on real ticks"**, deposit and leverage the same
+   as your account.
+
+## 5. The simple v7 EA (`ea/XAUUSD_Simple_Breakout_v7.mq5`)
+
+The whole strategy:
+
+| | Rule |
+|---|---|
+| Setup A | From 01:15 server: BUY STOP above **yesterday's high**, SELL STOP below **yesterday's low** |
+| Setup B | At 18:00 server: BUY STOP above the **London range high** (10:00–18:00), SELL STOP below its low |
+| Exit | Fixed SL ($), TP = SL × `InpRR`, optional breakeven at +1R. **No trailing stop** |
+| One at a time | When any order fills, all other pending orders are deleted |
+| Limits | Each setup at most once per day, max 2 trades per day, daily loss stop 2.5% |
+| End of day | Unfilled orders deleted at 22:30; open trades closed at 23:30 (before the break and the weekend) |
+| Size | Risk % of balance; the lot size is calculated by the broker from the SL distance |
+
+Removed compared with v6.03: the 4H module, confirmation modes, the micro breakeven/trailing, timezone models,
+spread padding and simulated spread (the converter handles spread now).
+
+## 6. How to test it (in this order)
+
+1. **Check the data first.** Open a D1 chart of `XAUUSD_DK` and compare a few PDH/PDL values with your broker's
+   chart. They should match within a few cents. There should be no Sunday candles.
+2. **Test each setup on its own.** Run `InpUsePDH=true, InpUseRange=false`, then the reverse, on 2023–2024. Note
+   the profit factor, max drawdown, number of trades, and average win vs average loss.
+3. **Small, coarse optimisation only.** `InpSL_USD` 3 / 5 / 8 / 12, `InpRR` 1.5 / 2 / 3, `InpBE_R` 0 / 1.
+   Pick a setting from a *stable area* of results, not the single best result.
+4. **Unseen data.** Run the chosen setting on 2025–2026 without changing anything. If the profit factor stays
+   above about 1.2 and the drawdown stays within your prop limits, it is worth trading on a demo account.
+5. **Demo forward test** for 4–8 weeks, then compare its trades with the tester run for the same dates.
