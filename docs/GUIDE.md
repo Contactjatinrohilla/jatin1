@@ -109,7 +109,7 @@ The whole strategy:
 | Exit | Fixed SL ($), TP = SL × `InpRR`, optional breakeven at +1R. **No trailing stop** |
 | One at a time | When any order fills, all other pending orders are deleted |
 | Limits | Each setup at most once per day, max 2 trades per day, daily loss stop 2.5% |
-| End of day | Unfilled orders deleted at 22:30; open trades closed at 23:30 (before the break and the weekend) |
+| End of day | Unfilled orders deleted at 22:00; open trades closed at 22:15 (`InpCloseMode`: daily, Fridays only, or never). The close is moved earlier automatically if the broker session ends before it |
 | Size | Risk % of balance; the lot size is calculated by the broker from the SL distance |
 
 Removed compared with v6.03: the 4H module, confirmation modes, the micro breakeven/trailing, timezone models,
@@ -197,10 +197,18 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_10_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
-   `InpEntryMode` 0–3, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (640 combinations).
+1. Load `ea/presets/v7_11_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
+   `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
    also score well.
 4. Run the best two or three settings on 2025–2026 without changing anything.
 5. Repeat step 4 with `InpNoTrade1 = 15:15-16:00` to see whether avoiding US data helps.
+
+### v7.11: close time fix
+The first v7.10 test on XAUUSD.m (`code1.1.xlsx`) shows no ticks after about 22:30 server time, so the old
+23:30 close never ran: 200 trades were held overnight and 39 over a weekend. New defaults are `InpTradeEnd=22:00`
+and `InpCloseTime=22:15`. The EA also moves the close to 5 minutes before the symbol's session end if that is
+earlier. `InpCloseMode = 1` deliberately holds trades overnight and closes only on Friday. In that test, overnight
+trades did better than same-day ones, so compare 0 vs 1. The EA also warns when `InpBE_R ≥ InpRR`, because
+breakeven can then never trigger.

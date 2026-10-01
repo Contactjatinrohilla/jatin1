@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.10                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.11                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -34,8 +34,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.10"
-#property version   "7.10"
+#property copyright "XAUUSD Simple Breakout v7.11"
+#property version   "7.11"
 
 #include <Trade\Trade.mqh>
 
@@ -52,6 +52,13 @@ enum ENUM_DIRECTION
    DIR_BOTH = 0, // Buy and sell
    DIR_BUY  = 1, // Buy only
    DIR_SELL = 2  // Sell only
+  };
+
+enum ENUM_CLOSE_MODE
+  {
+   CLOSE_DAILY  = 0, // Close open trades every day at CloseTime
+   CLOSE_FRIDAY = 1, // Hold overnight, close only on Friday (no weekend gap)
+   CLOSE_NEVER  = 2  // Never force-close (SL / TP only)
   };
 
 enum ENUM_SCORE
@@ -71,8 +78,9 @@ input string InpPDHStart        = "01:15";  // A: active from
 input bool   InpUseRange        = true;     // Setup B: session-range breakout
 input string InpRangeStart      = "10:00";  // B: range start (10:00 server = London 08:00)
 input string InpRangeEnd        = "18:00";  // B: range end = active from (18:00 server = London 16:00)
-input string InpTradeEnd        = "22:30";  // Delete unfilled orders / stop new entries at
-input string InpCloseTime       = "23:30";  // Close open trades at ("" = never)
+input string InpTradeEnd        = "22:00";  // Delete unfilled orders / stop new entries at
+input string InpCloseTime       = "22:15";  // Close open trades at (see CloseMode)
+input ENUM_CLOSE_MODE InpCloseMode = CLOSE_DAILY; // When CloseTime applies
 
 input group "=== 2. Entry ==="
 input ENUM_ENTRY_MODE InpEntryMode = ENTRY_STOP; // Entry mode
@@ -123,6 +131,7 @@ string   g_name[2] = {"PDH", "RANGE"};
 int      g_tPDH, g_tRangeStart, g_tRangeEnd, g_tTradeEnd, g_tClose;   // minutes after server midnight
 int      g_w1s = -1, g_w1e = -1, g_w2s = -1, g_w2e = -1;              // no-trade windows
 datetime g_day         = 0;
+int      g_closeToday  = -1;   // effective close minute today (-1 = none)
 bool     g_used[2];            // setup placed / traded - not re-tried until re-armed
 bool     g_filled[2];          // setup produced a trade today
 bool     g_spreadLog[2];
@@ -299,6 +308,16 @@ void RecoverUsed()
      }
   }
 
+// Last minute of today's trade session from the symbol specification (1440 if unknown).
+int SessionEndMin(int dow)
+  {
+   datetime from, to;
+   int end = -1;
+   for(int i = 0; i < 10 && SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, from, to); i++)
+      end = (int)MathMax(end, (long)to / 60);
+   return (end <= 0) ? 1440 : end;
+  }
+
 void NewDay(datetime day)
   {
    g_day     = day;
@@ -319,6 +338,17 @@ void NewDay(datetime day)
    string date = TimeToString(day, TIME_DATE);
    bool newsDay = (InpNoTradeDates != "" && StringFind(InpNoTradeDates, date) >= 0);
    g_dayBlocked = !dayOn[dt.day_of_week] || newsDay;
+
+   // Force-close time for today: per CloseMode, never later than 5 min before the session ends.
+   g_closeToday = -1;
+   if(g_tClose >= 0 && (InpCloseMode == CLOSE_DAILY || (InpCloseMode == CLOSE_FRIDAY && dt.day_of_week == 5)))
+     {
+      int sessEnd  = SessionEndMin(dt.day_of_week);
+      g_closeToday = (int)MathMin(g_tClose, sessEnd - 5);
+      if(g_closeToday < g_tClose)
+         PrintFormat("NOTE: trade session ends %02d:%02d - closing at %02d:%02d instead of %s",
+                     sessEnd / 60, sessEnd % 60, g_closeToday / 60, g_closeToday % 60, InpCloseTime);
+     }
 
    PrintFormat("=== %s | trades today=%d | PDH %s | RANGE %s%s", date, g_tradesToday,
                g_used[SET_PDH] ? "used" : "waiting", g_used[SET_RANGE] ? "used" : "waiting",
@@ -574,6 +604,9 @@ int OnInit()
    if(InpMaxTradesDay < 1)                        return Fail("MaxTradesDay must be >= 1");
    if(InpMinTrades < 0 || InpScoreMaxDD < 0 || InpScoreWorstR < 0) return Fail("score filters must be >= 0");
 
+   if(InpBE_R > 0 && InpRR > 0 && InpBE_R >= InpRR)
+      PrintFormat("WARNING: breakeven at %.1fR is at/after the TP at %.1fR - breakeven will never trigger", InpBE_R, InpRR);
+
    g_magic[SET_PDH]   = InpMagic + 1;
    g_magic[SET_RANGE] = InpMagic + 2;
    g_trade.SetTypeFillingBySymbol(_Symbol);
@@ -590,7 +623,8 @@ int OnInit()
                InpRR > 0 ? StringFormat("$%.2f", InpSL_USD * InpRR) : "off",
                InpBE_R > 0 ? StringFormat("at +$%.2f", InpSL_USD * InpBE_R) : "off", InpRiskPct, InpMaxTradesDay);
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",
-               InpPDHStart, InpRangeStart, InpRangeEnd, InpTradeEnd, g_tClose >= 0 ? InpCloseTime : "never",
+               InpPDHStart, InpRangeStart, InpRangeEnd, InpTradeEnd, (g_tClose < 0 || InpCloseMode == CLOSE_NEVER) ? "never" :
+               (InpCloseMode == CLOSE_FRIDAY ? InpCloseTime + " Fridays" : InpCloseTime),
                InpNoTrade1 == "" ? "-" : InpNoTrade1, InpNoTrade2);
    return INIT_SUCCEEDED;
   }
@@ -637,7 +671,7 @@ void OnTick()
 
    //--- time limits
    if(mins >= g_tTradeEnd) DeletePendings("trade window ended");
-   if(g_tClose >= 0 && mins >= g_tClose) ClosePositions("close time");
+   if(g_closeToday >= 0 && mins >= g_closeToday) ClosePositions("close time");
 
    //--- new entries
    if(inTrade || inWindow || g_dayBlocked || mins >= g_tTradeEnd || g_tradesToday >= InpMaxTradesDay) return;
