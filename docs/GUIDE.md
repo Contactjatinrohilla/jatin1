@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_12_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_20_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -212,3 +212,37 @@ and `InpCloseTime=22:15`. The EA also moves the close to 5 minutes before the sy
 earlier. `InpCloseMode = 1` deliberately holds trades overnight and closes only on Friday. In that test, overnight
 trades did better than same-day ones, so compare 0 vs 1. The EA also warns when `InpBE_R ≥ InpRR`, because
 breakeven can then never trigger.
+
+## 9. v7.20: trailing stop and 4H straddle (both off by default)
+
+### Trailing stop (section 3)
+| Input | Default | Meaning |
+|---|---|---|
+| `InpTrailMode` | 0 Off | 1 = distance in R (`InpTrailDist_R` × SL), 2 = ATR (`InpTrailATR_Mult` × ATR(`InpTrailATR_Period`) on `InpTrailATR_TF`) |
+| `InpTrailStart_R` | 1.0 | Start trailing once the trade is this many R in profit |
+| `InpTrailDist_R` | 1.0 | R mode: with SL $10, the stop follows $10 behind price |
+| `InpTrailMinDist_USD` | 2.00 | Never closer than this, so the old 10-point micro-trail can't happen |
+| `InpTrailStep_USD` | 0.50 | Move the SL only in steps of at least $0.50 |
+
+The SL only ever moves in the trade's favour. Breakeven and the trail work together; the tighter of the two wins.
+**A trail can't act if it starts at or after the TP.** For a "let winners run" test, use `InpRR = 0` (no TP) or a
+larger RR such as 3–4. The EA warns when the trail can never act.
+
+Suggested tests (compare with Code3):
+1. `InpTrailMode=1, InpTrailStart_R=1, InpTrailDist_R=1, InpRR=0`, with the daily close kept on.
+2. The same with `InpCloseMode=1` (hold overnight) so trends can run.
+3. `InpTrailMode=2, InpTrailATR_TF=H1, InpTrailATR_Mult=2, InpRR=0`.
+
+### 4H straddle (section 1)
+| Input | Default | Meaning |
+|---|---|---|
+| `InpUse4H` | false | Setup C: BUY STOP above / SELL STOP below the previous completed H4 candle |
+| `InpH4From` / `InpH4To` | 08:00 / 20:00 | Only H4 candles opening in this window (08:00, 12:00, 16:00 server) |
+
+- A new straddle is placed at every allowed H4 candle open. Its unfilled orders are deleted when the next H4 candle opens.
+- It follows every other rule: entry mode, one trade at a time, max trades per day, no-trade windows, level-size
+  filter, daily close. Magic number = `InpMagic + 3`.
+- In the old v5.x EA, 4H generated 86% of all trades and lost on real ticks with micro-stops. Test it on its own
+  first (`InpUsePDH=false, InpUseRange=false, InpUse4H=true`). The H4 range is often only a few dollars, so also try
+  `InpMinLevelRange_USD` (for example 5) and `InpEntryMode=2` (close confirmation).
+- With 4H on, `InpMaxTradesDay` (2) limits how many 4H trades can happen. Raise it to 3–4 if you want more.

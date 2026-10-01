@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.12                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.20                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -7,6 +7,9 @@
 //|  SETUP B  Session range (default = London 08:00-16:00 London time)|
 //|           = highest high / lowest low of the M1 bars from         |
 //|           RangeStart to RangeEnd, active from RangeEnd.           |
+//|  SETUP C  4H straddle: previous completed H4 candle high/low, a   |
+//|           new straddle each H4 candle that opens inside the       |
+//|           H4From-H4To window; unfilled orders end with the candle.|
 //|                                                                  |
 //|  ENTRY MODES (InpEntryMode - optimisable)                        |
 //|   0 STOP        BUY STOP above the high, SELL STOP below the low  |
@@ -25,6 +28,8 @@
 //|     filter, direction switch.                                    |
 //|   - Orders deleted at TradeEnd, trades closed at CloseTime.       |
 //|   - Daily loss stop on closed + open P/L. Optional breakeven.     |
+//|   - Optional trailing stop: distance in R (x SL) or x ATR, never  |
+//|     closer than TrailMinDist (no micro-trailing).                 |
 //|                                                                  |
 //|  OPTIMISATION: select "Custom max" in the Strategy Tester and     |
 //|  pick what to maximise with InpScore (section 7).                 |
@@ -34,8 +39,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.12"
-#property version   "7.12"
+#property copyright "XAUUSD Simple Breakout v7.20"
+#property version   "7.20"
 
 #include <Trade\Trade.mqh>
 
@@ -61,6 +66,13 @@ enum ENUM_CLOSE_MODE
    CLOSE_NEVER  = 2  // Never force-close (SL / TP only)
   };
 
+enum ENUM_TRAIL_MODE
+  {
+   TRAIL_OFF = 0, // Off
+   TRAIL_R   = 1, // Distance = TrailDist_R x SL
+   TRAIL_ATR = 2  // Distance = ATR x TrailATR_Mult
+  };
+
 enum ENUM_SCORE
   {
    SCORE_ROBUST   = 0, // Robust: (PF-1) x sqrt(trades) / max DD%
@@ -78,6 +90,9 @@ input string InpPDHStart        = "01:15";  // A: active from
 input bool   InpUseRange        = true;     // Setup B: session-range breakout
 input string InpRangeStart      = "10:00";  // B: range start (10:00 server = London 08:00)
 input string InpRangeEnd        = "18:00";  // B: range end = active from (18:00 server = London 16:00)
+input bool   InpUse4H           = false;    // Setup C: 4H candle high/low straddle
+input string InpH4From          = "08:00";  // C: only H4 candles opening at/after this time
+input string InpH4To            = "20:00";  // C: ...and before this time (H4 opens 00,04,08,12,16,20)
 input string InpTradeEnd        = "22:00";  // Delete unfilled orders / stop new entries at
 input string InpCloseTime       = "22:15";  // Close open trades at (see CloseMode)
 input ENUM_CLOSE_MODE InpCloseMode = CLOSE_DAILY; // When CloseTime applies
@@ -95,6 +110,14 @@ input group "=== 3. Exit (USD price distance: 5.00 = $5 gold move) ==="
 input double InpSL_USD          = 5.00;     // Stop loss distance
 input double InpRR              = 2.0;      // Take profit = SL x this (0 = no TP)
 input double InpBE_R            = 1.0;      // Move SL to entry at this many R in profit (0 = off)
+input ENUM_TRAIL_MODE InpTrailMode = TRAIL_OFF; // Trailing stop
+input double InpTrailStart_R    = 1.0;      // Trail: start once the trade is this many R in profit
+input double InpTrailDist_R     = 1.0;      // Trail (R mode): distance behind price = this x SL
+input ENUM_TIMEFRAMES InpTrailATR_TF = PERIOD_H1; // Trail (ATR mode): ATR timeframe
+input int    InpTrailATR_Period = 14;       // Trail (ATR mode): ATR period
+input double InpTrailATR_Mult   = 2.0;      // Trail (ATR mode): distance = ATR x this
+input double InpTrailMinDist_USD = 2.00;    // Trail: never closer than this to price
+input double InpTrailStep_USD   = 0.50;     // Trail: move SL only in steps of at least this
 
 input group "=== 4. Filters ==="
 input bool   InpTradeMon        = true;     // Trade Monday
@@ -112,9 +135,9 @@ input double InpMaxLevelRange_USD = 0.0;    // Skip a setup if high-low is large
 
 input group "=== 5. Risk ==="
 input double InpRiskPct         = 1.0;      // Risk % of balance per trade
-input int    InpMaxTradesDay    = 2;        // Max trades per day (both setups together)
+input int    InpMaxTradesDay    = 2;        // Max trades per day (all setups together)
 input double InpMaxDailyLossPct = 2.5;      // Close all + stop for the day at this loss % (0 = off)
-input ulong  InpMagic           = 700000;   // Magic base (A = +1, B = +2)
+input ulong  InpMagic           = 700000;   // Magic base (A = +1, B = +2, C = +3)
 
 input group "=== 6. Optimisation: Custom max (Strategy Tester only) ==="
 input ENUM_SCORE InpScore       = SCORE_ROBUST; // What "Custom max" maximises
@@ -124,20 +147,25 @@ input double InpScoreWorstR     = 3.0;      // Score 0 if any trade lost more th
 
 #define SET_PDH   0
 #define SET_RANGE 1
+#define SET_H4    2
+#define NSETS     3
 
 CTrade   g_trade;
-ulong    g_magic[2];
-string   g_name[2] = {"PDH", "RANGE"};
+ulong    g_magic[NSETS];
+string   g_name[NSETS] = {"PDH", "RANGE", "H4"};
 int      g_tPDH, g_tRangeStart, g_tRangeEnd, g_tTradeEnd, g_tClose;   // minutes after server midnight
+int      g_tH4From, g_tH4To;
+datetime g_h4Start     = 0;    // open time of the current H4 candle
+int      g_atr         = INVALID_HANDLE;
 int      g_w1s = -1, g_w1e = -1, g_w2s = -1, g_w2e = -1;              // no-trade windows
 datetime g_day         = 0;
 int      g_closeToday  = -1;   // effective close minute today (-1 = none)
-bool     g_used[2];            // setup placed / traded - not re-tried until re-armed
-bool     g_filled[2];          // setup produced a trade today
-bool     g_spreadLog[2];
-bool     g_levelLog[2];
-bool     g_levelOk[2];
-datetime g_lastBar[2];
+bool     g_used[NSETS];            // setup placed / traded - not re-tried until re-armed
+bool     g_filled[NSETS];          // setup produced a trade today
+bool     g_spreadLog[NSETS];
+bool     g_levelLog[NSETS];
+bool     g_levelOk[NSETS];
+datetime g_lastBar[NSETS];
 bool     g_dayBlocked  = false;
 bool     g_halted      = false;
 bool     g_stopLimitOk = true;
@@ -194,10 +222,25 @@ double Norm(double price)
    return NormalizeDouble(MathRound(price / tick) * tick, _Digits);
   }
 
-bool IsOurMagic(ulong m) { return m == g_magic[SET_PDH] || m == g_magic[SET_RANGE]; }
-int  SetOf(ulong m)      { return (m == g_magic[SET_PDH]) ? SET_PDH : SET_RANGE; }
+bool IsOurMagic(ulong m) { return m == g_magic[SET_PDH] || m == g_magic[SET_RANGE] || m == g_magic[SET_H4]; }
+int  SetOf(ulong m)      { return (m == g_magic[SET_PDH]) ? SET_PDH : (m == g_magic[SET_RANGE]) ? SET_RANGE : SET_H4; }
+bool SetEnabled(int s)   { return s == SET_PDH ? InpUsePDH : s == SET_RANGE ? InpUseRange : InpUse4H; }
 bool DirOK(bool isBuy)   { return InpDirection == DIR_BOTH || (isBuy ? InpDirection == DIR_BUY : InpDirection == DIR_SELL); }
-int  ActiveFrom(int s)   { return (s == SET_PDH) ? g_tPDH : g_tRangeEnd; }
+// Time from which setup s may enter (PDH / RANGE: today's start time; H4: the current H4 candle).
+datetime ActiveTime(int s)
+  {
+   if(s == SET_PDH)   return g_day + g_tPDH * 60;
+   if(s == SET_RANGE) return g_day + g_tRangeEnd * 60;
+   return g_h4Start;
+  }
+
+// H4 setup only for candles opening inside the H4From-H4To window.
+bool H4Allowed()
+  {
+   if(g_h4Start <= 0) return false;
+   int m = (int)(((long)g_h4Start % 86400) / 60);
+   return m >= g_tH4From && m < g_tH4To;
+  }
 
 int OurPositions()
   {
@@ -210,7 +253,7 @@ int OurPositions()
 
 // Deletes our pending orders (only those placed before olderThan, if given).
 // Returns a bit mask of the setups that lost an order (bit 0 = PDH, bit 1 = RANGE).
-int DeletePendings(string why, datetime olderThan = 0)
+int DeletePendings(string why, datetime olderThan = 0, int setMask = 7)
   {
    int mask = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -218,7 +261,7 @@ int DeletePendings(string why, datetime olderThan = 0)
       ulong t = OrderGetTicket(i);
       if(t == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
       ulong mg = (ulong)OrderGetInteger(ORDER_MAGIC);
-      if(!IsOurMagic(mg)) continue;
+      if(!IsOurMagic(mg) || (setMask & (1 << SetOf(mg))) == 0) continue;
       if(olderThan > 0 && (datetime)OrderGetInteger(ORDER_TIME_SETUP) >= olderThan) continue;
       g_trade.SetExpertMagicNumber(mg);
       if(g_trade.OrderDelete(t))
@@ -235,7 +278,7 @@ int DeletePendings(string why, datetime olderThan = 0)
 void CancelAndRearm(string why)
   {
    int mask = DeletePendings(why);
-   for(int s = 0; s < 2; s++)
+   for(int s = 0; s < NSETS; s++)
       if((mask & (1 << s)) != 0 && !g_filled[s]) g_used[s] = false;
   }
 
@@ -274,7 +317,7 @@ void RecountToday()
    if(!HistorySelect(g_day, TimeCurrent() + 60)) return;   // retried next tick
    g_recount     = false;
    g_tradesToday = 0;
-   g_filled[SET_PDH] = g_filled[SET_RANGE] = false;
+   for(int s = 0; s < NSETS; s++) g_filled[s] = false;
    double closed = 0;
    for(int i = 0; i < HistoryDealsTotal(); i++)
      {
@@ -289,22 +332,26 @@ void RecountToday()
          HistoryDealGetString(d, DEAL_SYMBOL) == _Symbol && IsOurMagic(mg))
         {
          g_tradesToday++;
-         g_filled[SetOf(mg)] = true;
+         int s = SetOf(mg);
+         // H4 "filled" means: in the current H4 candle; PDH / RANGE: today.
+         if(s != SET_H4 || (datetime)HistoryDealGetInteger(d, DEAL_TIME) >= g_h4Start) g_filled[s] = true;
         }
      }
    g_dayStartBal = AccountInfoDouble(ACCOUNT_BALANCE) - closed;
   }
 
-// A setup is used if it already traded today or still has a live order.
+// A setup is used if it already traded (today / this H4 candle) or still has a live order.
 void RecoverUsed()
   {
-   for(int s = 0; s < 2; s++) g_used[s] = g_filled[s];
+   for(int s = 0; s < NSETS; s++) g_used[s] = g_filled[s];
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong t = OrderGetTicket(i);
       if(t == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
       ulong mg = (ulong)OrderGetInteger(ORDER_MAGIC);
-      if(IsOurMagic(mg) && (datetime)OrderGetInteger(ORDER_TIME_SETUP) >= g_day) g_used[SetOf(mg)] = true;
+      if(!IsOurMagic(mg)) continue;
+      datetime since = (SetOf(mg) == SET_H4) ? g_h4Start : g_day;
+      if((datetime)OrderGetInteger(ORDER_TIME_SETUP) >= since) g_used[SetOf(mg)] = true;
      }
   }
 
@@ -324,7 +371,7 @@ void NewDay(datetime day)
    g_halted  = false;
    g_rangeHi = 0;
    g_rangeLo = 0;
-   for(int s = 0; s < 2; s++) { g_spreadLog[s] = false; g_levelLog[s] = false; g_levelOk[s] = false; }
+   for(int s = 0; s < NSETS; s++) { g_spreadLog[s] = false; g_levelLog[s] = false; g_levelOk[s] = false; }
    DeletePendings("left over from a previous day", day);
    g_recount = true;
    RecountToday();
@@ -361,6 +408,20 @@ void NewDay(datetime day)
                g_dayBlocked ? (newsDay ? " | NO-TRADE DATE" : " | weekday switched off") : "");
   }
 
+// New H4 candle: the previous candle's unfilled H4 orders end, the H4 setup starts fresh.
+void NewH4(datetime h)
+  {
+   g_h4Start = h;
+   if(!InpUse4H) return;
+   DeletePendings("previous 4H candle ended", h, 1 << SET_H4);
+   g_spreadLog[SET_H4] = false;
+   g_levelLog[SET_H4]  = false;
+   g_levelOk[SET_H4]   = false;
+   g_recount = true;
+   RecountToday();
+   RecoverUsed();
+  }
+
 //+------------------------------------------------------------------+
 //|  Levels                                                          |
 //+------------------------------------------------------------------+
@@ -369,6 +430,16 @@ bool GetPDH(double &hi, double &lo)
    MqlRates r[];
    if(CopyRates(_Symbol, PERIOD_D1, 0, 2, r) < 2) return false;
    if(r[1].time != g_day) return false;   // today's D1 bar not built yet (r[0] = previous day)
+   hi = r[0].high;
+   lo = r[0].low;
+   return hi > lo;
+  }
+
+bool GetH4(double &hi, double &lo)
+  {
+   MqlRates r[];
+   if(CopyRates(_Symbol, PERIOD_H4, 0, 2, r) < 2) return false;
+   if(r[1].time != g_h4Start) return false;   // current H4 bar not built yet (r[0] = previous candle)
    hi = r[0].high;
    lo = r[0].low;
    return hi > lo;
@@ -405,7 +476,8 @@ void DrawLevel(string name, datetime t1, datetime t2, double price, color clr)
 // Levels for setup s, checked against the level-size filter (logged and drawn once per day).
 bool GetLevels(int s, double &hi, double &lo)
   {
-   if(!(s == SET_PDH ? GetPDH(hi, lo) : GetRange(hi, lo))) return false;
+   bool ok = (s == SET_PDH) ? GetPDH(hi, lo) : (s == SET_RANGE) ? GetRange(hi, lo) : GetH4(hi, lo);
+   if(!ok) return false;
    if(!g_levelLog[s])
      {
       g_levelLog[s] = true;
@@ -416,9 +488,13 @@ bool GetLevels(int s, double &hi, double &lo)
                   g_levelOk[s] ? "" : " -> SKIPPED by level-size filter");
       if(!MQLInfoInteger(MQL_OPTIMIZATION))
         {
-         datetime t1 = g_day + (s == SET_PDH ? g_tPDH : g_tRangeStart) * 60, t2 = g_day + g_tTradeEnd * 60;
-         DrawLevel(g_name[s] + "_H_" + TimeToString(g_day, TIME_DATE), t1, t2, hi, s == SET_PDH ? clrDodgerBlue : clrLime);
-         DrawLevel(g_name[s] + "_L_" + TimeToString(g_day, TIME_DATE), t1, t2, lo, s == SET_PDH ? clrOrangeRed : clrYellow);
+         datetime t1 = (s == SET_H4) ? g_h4Start : g_day + (s == SET_PDH ? g_tPDH : g_tRangeStart) * 60;
+         datetime t2 = (s == SET_H4) ? g_h4Start + 4 * 3600 : g_day + g_tTradeEnd * 60;
+         string   id = TimeToString(s == SET_H4 ? g_h4Start : g_day, TIME_DATE | TIME_MINUTES);
+         color    ch = (s == SET_PDH) ? clrDodgerBlue : (s == SET_RANGE) ? clrLime : clrMagenta;
+         color    cl = (s == SET_PDH) ? clrOrangeRed : (s == SET_RANGE) ? clrYellow : clrAqua;
+         DrawLevel(g_name[s] + "_H_" + id, t1, t2, hi, ch);
+         DrawLevel(g_name[s] + "_L_" + id, t1, t2, lo, cl);
         }
      }
    return g_levelOk[s];
@@ -515,7 +591,7 @@ void CheckConfirm(int s, double hi, double lo)
    bool firstLook = (g_lastBar[s] == 0);
    g_lastBar[s] = bar;
    if(firstLook) return;                                         // never act on a stale candle after a (re)start
-   if(iTime(_Symbol, InpConfirmTF, 1) < g_day + ActiveFrom(s) * 60) return;   // candle began before the setup was active
+   if(iTime(_Symbol, InpConfirmTF, 1) < ActiveTime(s)) return;   // candle began before the setup was active
 
    double c = iClose(_Symbol, InpConfirmTF, 1);
    bool isBuy = false;
@@ -549,29 +625,57 @@ void CheckConfirm(int s, double hi, double lo)
    if(sent) g_used[s] = true;
   }
 
-// Moves SL to the entry price once the trade is InpBE_R x SL in profit.
-void ManageBreakeven()
+// Trailing distance in USD for the current tick (0 = trailing off / not available).
+double TrailDistance()
   {
-   if(InpBE_R <= 0) return;
-   double trigger = InpBE_R * InpSL_USD;
+   double d = 0;
+   if(InpTrailMode == TRAIL_R) d = InpTrailDist_R * InpSL_USD;
+   else if(InpTrailMode == TRAIL_ATR && g_atr != INVALID_HANDLE)
+     {
+      double b[];
+      if(CopyBuffer(g_atr, 0, 1, 1, b) == 1 && b[0] > 0) d = b[0] * InpTrailATR_Mult;
+     }
+   return (d > 0) ? MathMax(d, InpTrailMinDist_USD) : 0;
+  }
+
+// Breakeven (at InpBE_R) and trailing stop (from InpTrailStart_R). The SL only ever moves
+// in the trade's favour, by at least InpTrailStep_USD, and respects the broker stop level.
+void ManageStops()
+  {
+   bool trailOn = (InpTrailMode != TRAIL_OFF);
+   if(InpBE_R <= 0 && !trailOn) return;
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double trailDist = trailOn ? TrailDistance() : 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
       if(t == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       ulong mg = (ulong)PositionGetInteger(POSITION_MAGIC);
       if(!IsOurMagic(mg)) continue;
-      bool   buy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-      double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl   = PositionGetDouble(POSITION_SL);
-      double tp   = PositionGetDouble(POSITION_TP);
-      double be   = Norm(open);
-      if(buy ? (bid - open < trigger || sl >= be || bid - be <= minDist)
-             : (open - ask < trigger || (sl > 0 && sl <= be) || be - ask <= minDist)) continue;
+      bool   buy    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double tp     = PositionGetDouble(POSITION_TP);
+      double profit = buy ? bid - open : open - ask;      // in USD of price
+      double target = 0;                                 // best SL allowed now (0 = none)
+      string why    = "";
+
+      if(InpBE_R > 0 && profit >= InpBE_R * InpSL_USD) { target = Norm(open); why = "breakeven"; }
+      if(trailDist > 0 && profit >= InpTrailStart_R * InpSL_USD)
+        {
+         double tr = Norm(buy ? bid - trailDist : ask + trailDist);
+         if(target == 0 || (buy ? tr > target : tr < target)) { target = tr; why = "trail"; }
+        }
+      if(target == 0) continue;
+      if(buy ? (bid - target <= minDist) : (target - ask <= minDist)) continue;          // too close for the broker
+      double gain = (sl <= 0) ? DBL_MAX : (buy ? target - sl : sl - target);
+      double step = (why == "trail") ? MathMax(InpTrailStep_USD, _Point) : _Point / 2;
+      if(gain < step) continue;                                                          // not an improvement
       g_trade.SetExpertMagicNumber(mg);
-      if(g_trade.PositionModify(t, be, tp)) PrintFormat("Position #%I64u SL -> breakeven %.*f", t, _Digits, be);
+      if(g_trade.PositionModify(t, target, tp))
+         PrintFormat("Position #%I64u SL -> %.*f (%s, +$%.2f in profit)", t, _Digits, target, why, profit);
      }
   }
 
@@ -592,11 +696,20 @@ int OnInit()
    g_tRangeEnd   = ParseHHMM(InpRangeEnd);
    g_tTradeEnd   = ParseHHMM(InpTradeEnd);
    g_tClose      = ParseHHMM(InpCloseTime);
-   if(g_tPDH < 0 || g_tRangeStart < 0 || g_tRangeEnd < 0 || g_tTradeEnd < 0 || g_tClose == -2)
+   g_tH4From     = ParseHHMM(InpH4From);
+   g_tH4To       = ParseHHMM(InpH4To);
+   if(g_tPDH < 0 || g_tRangeStart < 0 || g_tRangeEnd < 0 || g_tTradeEnd < 0 || g_tClose == -2 ||
+      g_tH4From < 0 || g_tH4To < 0)
       return Fail("times must be HH:MM, 00:00-23:59");
    if(!ParseWindow(InpNoTrade1, g_w1s, g_w1e) || !ParseWindow(InpNoTrade2, g_w2s, g_w2e))
       return Fail("no-trade windows must be HH:MM-HH:MM (or empty)");
-   if(!InpUsePDH && !InpUseRange)                 return Fail("both setups are off");
+   if(!InpUsePDH && !InpUseRange && !InpUse4H)    return Fail("all setups are off");
+   if(InpUse4H && g_tH4From >= g_tH4To)           return Fail("H4From must be before H4To");
+   if(InpTrailMode != TRAIL_OFF && (InpTrailStart_R <= 0 || InpTrailMinDist_USD < 0.5 || InpTrailStep_USD < 0))
+      return Fail("trail: Start_R must be > 0, MinDist >= $0.50 (no micro-trailing), Step >= 0");
+   if(InpTrailMode == TRAIL_R && InpTrailDist_R <= 0)  return Fail("TrailDist_R must be > 0");
+   if(InpTrailMode == TRAIL_ATR && (InpTrailATR_Period < 1 || InpTrailATR_Mult <= 0))
+      return Fail("ATR trail needs Period >= 1 and Mult > 0");
    if(InpUsePDH && g_tPDH >= g_tTradeEnd)         return Fail("PDHStart must be before TradeEnd");
    if(InpUseRange && !(g_tRangeStart < g_tRangeEnd && g_tRangeEnd < g_tTradeEnd))
       return Fail("need RangeStart < RangeEnd < TradeEnd");
@@ -615,9 +728,19 @@ int OnInit()
 
    g_magic[SET_PDH]   = InpMagic + 1;
    g_magic[SET_RANGE] = InpMagic + 2;
+   g_magic[SET_H4]    = InpMagic + 3;
+   if(InpTrailMode == TRAIL_ATR)
+     {
+      g_atr = iATR(_Symbol, InpTrailATR_TF, InpTrailATR_Period);
+      if(g_atr == INVALID_HANDLE) return Fail("could not create the ATR indicator");
+     }
+   if(InpTrailMode != TRAIL_OFF && InpRR > 0 && InpTrailStart_R >= InpRR)
+      PrintFormat("WARNING: trail starts at %.1fR, at/after the TP at %.1fR - it will never act. Use RR 0 or a bigger RR",
+                  InpTrailStart_R, InpRR);
    g_trade.SetTypeFillingBySymbol(_Symbol);
    g_trade.SetDeviationInPoints((ulong)MathMax(1, MathRound(0.50 / _Point)));   // $0.50 market-order slippage
-   g_lastBar[SET_PDH] = g_lastBar[SET_RANGE] = 0;
+   for(int s = 0; s < NSETS; s++) g_lastBar[s] = 0;
+   g_h4Start = 0;
    g_sumR = 0; g_worstR = 0; g_nR = 0; g_openRisk = 0;
 
    g_stopLimitOk = (SymbolInfoInteger(_Symbol, SYMBOL_ORDER_MODE) & SYMBOL_ORDER_STOP_LIMIT) != 0;
@@ -628,6 +751,8 @@ int OnInit()
                _Symbol, _Digits, EnumToString(InpEntryMode), InpSL_USD, InpSL_USD / _Point,
                InpRR > 0 ? StringFormat("$%.2f", InpSL_USD * InpRR) : "off",
                InpBE_R > 0 ? StringFormat("at +$%.2f", InpSL_USD * InpBE_R) : "off", InpRiskPct, InpMaxTradesDay);
+   PrintFormat("Trail %s | 4H straddle %s", EnumToString(InpTrailMode),
+               InpUse4H ? StringFormat("ON for H4 candles %s-%s", InpH4From, InpH4To) : "off");
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",
                InpPDHStart, InpRangeStart, InpRangeEnd, InpTradeEnd, (g_tClose < 0 || InpCloseMode == CLOSE_NEVER) ? "never" :
                (InpCloseMode == CLOSE_FRIDAY ? InpCloseTime + " Fridays" : InpCloseTime),
@@ -640,10 +765,12 @@ void OnTick()
    datetime now = TimeCurrent();
    datetime day = (datetime)((long)now - (long)now % 86400);   // server midnight
    if(day != g_day) NewDay(day);
+   datetime h4 = iTime(_Symbol, PERIOD_H4, 0);
+   if(h4 > 0 && h4 != g_h4Start) NewH4(h4);
    if(g_recount) RecountToday();
    int mins = (int)((now - day) / 60);
 
-   ManageBreakeven();
+   ManageStops();
 
    //--- daily loss stop (closed + open P/L since the start of the day)
    if(!g_halted && InpMaxDailyLossPct > 0 && g_dayStartBal > 0)
@@ -682,9 +809,10 @@ void OnTick()
    //--- new entries
    if(inTrade || inWindow || g_dayBlocked || mins >= g_tTradeEnd || g_tradesToday >= InpMaxTradesDay) return;
 
-   for(int s = 0; s < 2; s++)
+   for(int s = 0; s < NSETS; s++)
      {
-      if(!(s == SET_PDH ? InpUsePDH : InpUseRange) || g_used[s] || g_filled[s] || mins < ActiveFrom(s)) continue;
+      if(!SetEnabled(s) || g_used[s] || g_filled[s] || now < ActiveTime(s)) continue;
+      if(s == SET_H4 && !H4Allowed()) continue;
       double hi, lo;
       if(!GetLevels(s, hi, lo)) continue;
       if(InpEntryMode == ENTRY_STOP || InpEntryMode == ENTRY_STOP_LIMIT) PlaceStraddle(s, hi, lo);
@@ -751,5 +879,11 @@ double OnTester()
    PrintFormat("SCORE %s = %.4f | trades %.0f PF %.2f DD %.1f%% avgR %.2f worstR %.2f%s", EnumToString(InpScore),
                score, trades, pf, ddPct, avgR, g_worstR, gate == "" ? "" : " | 0 because " + gate);
    return score;
+  }
+//+------------------------------------------------------------------+
+
+void OnDeinit(const int reason)
+  {
+   if(g_atr != INVALID_HANDLE) IndicatorRelease(g_atr);
   }
 //+------------------------------------------------------------------+
