@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.60                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.70                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -36,13 +36,14 @@
 //|  OPTIMISATION: select "Custom max" in the Strategy Tester and     |
 //|  pick what to maximise with InpScore (section 7).                 |
 //|                                                                  |
-//|  UNITS: distances in USD of gold price (5.00 = a $5 move), so     |
-//|  2-digit and 3-digit symbols behave identically.                  |
+//|  UNITS: all distances use InpDistUnit - PRICE (gold $, index     |
+//|  points; default), POINTS or PIPS (forex). Works on any symbol:  |
+//|  XAUUSD, NAS100/USTEC, EURUSD... (lots sized by the broker).     |
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.60"
-#property version   "7.60"
+#property copyright "XAUUSD Simple Breakout v7.70"
+#property version   "7.70"
 
 #include <Trade\Trade.mqh>
 
@@ -77,6 +78,13 @@ enum ENUM_SERVER_DST
    SDST_NONE = 2  // No summer time (fixed offset)
   };
 
+enum ENUM_DIST_UNIT
+  {
+   UNIT_PRICE  = 0, // Price (gold: 5.0 = $5 move; NAS100: 5.0 = 5 index points)
+   UNIT_POINTS = 1, // Points (the symbol's smallest price step)
+   UNIT_PIPS   = 2  // Pips (forex: 1 pip = 10 points on 5/3-digit pairs)
+  };
+
 enum ENUM_DIRECTION
   {
    DIR_BOTH = 0, // Buy and sell
@@ -101,6 +109,9 @@ enum ENUM_SCORE
    SCORE_AVG_R    = 5, // Average R per trade (expectancy)
    SCORE_RET_DD   = 6  // Return % / max DD %
   };
+
+input group "=== 0. Symbol / units ==="
+input ENUM_DIST_UNIT InpDistUnit = UNIT_PRICE; // Unit of ALL distance inputs (SL, BE, trail, spread, slip, buffer...)
 
 input group "=== 1. Setups (SERVER time, HH:MM) ==="
 input bool   InpUsePDH          = true;     // Setup A: previous-day high/low breakout
@@ -132,7 +143,7 @@ input double InpMaxSpread_USD   = 0.60;     // Wait while the spread is wider th
 input bool   InpSkipBroken      = true;     // STOP modes: skip a side whose level price already traded through
 input double InpBrokenTol_USD   = 0.00;     // ...counts as broken when price came within this of the level
 
-input group "=== 3. Exit (USD price distance: 5.00 = $5 gold move) ==="
+input group "=== 3. Exit (distances in the unit chosen in section 0) ==="
 input double InpSL_USD          = 5.00;     // Stop loss distance
 input double InpRR              = 2.0;      // Take profit = SL x this (0 = no TP)
 input double InpBE_Trigger_USD  = 5.00;     // Breakeven: move SL to entry when the trade is this much in profit (0 = off)
@@ -167,6 +178,10 @@ input ENUM_SCORE InpScore       = SCORE_ROBUST; // What "Custom max" maximises
 input int    InpMinTrades       = 100;      // Score 0 below this many trades
 input double InpScoreMaxDD      = 10.0;     // Score 0 if max equity DD % is above this (0 = off)
 input double InpScoreWorstR     = 3.0;      // Score 0 if any trade lost more than this many R (0 = off)
+
+// Distance inputs converted to price once in OnInit (see InpDistUnit).
+double   g_unit, g_SL, g_BEtrig, g_BElock, g_TrStart, g_TrDist, g_TrStep;
+double   g_Buf, g_Slip, g_Chase, g_Spread, g_BrkTol, g_MinLvl, g_MaxLvl;
 
 #define SET_PDH   0
 #define SET_RANGE 1
@@ -334,10 +349,10 @@ void ClosePositions(string why)
 bool SpreadOK(int s)
   {
    double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(spread <= InpMaxSpread_USD) return true;
+   if(spread <= g_Spread) return true;
    if(!g_spreadLog[s])
      {
-      PrintFormat("[%s] waiting: spread $%.2f > max $%.2f", g_name[s], spread, InpMaxSpread_USD);
+      PrintFormat("[%s] waiting: spread %g > max %g", g_name[s], spread, g_Spread);
       g_spreadLog[s] = true;
      }
    return false;
@@ -579,9 +594,9 @@ bool GetLevels(int s, double &hi, double &lo)
      {
       g_levelLog[s] = true;
       double size = hi - lo;
-      g_levelOk[s] = !((InpMinLevelRange_USD > 0 && size < InpMinLevelRange_USD) ||
-                       (InpMaxLevelRange_USD > 0 && size > InpMaxLevelRange_USD));
-      PrintFormat("[%s] levels high=%.*f low=%.*f size=$%.2f%s", g_name[s], _Digits, hi, _Digits, lo, size,
+      g_levelOk[s] = !((g_MinLvl > 0 && size < g_MinLvl) ||
+                       (g_MaxLvl > 0 && size > g_MaxLvl));
+      PrintFormat("[%s] levels high=%.*f low=%.*f size=%g%s", g_name[s], _Digits, hi, _Digits, lo, size,
                   g_levelOk[s] ? "" : " -> SKIPPED by level-size filter");
       if(!MQLInfoInteger(MQL_OPTIMIZATION))
         {
@@ -637,8 +652,8 @@ bool SendOrder(int s, ENUM_ORDER_TYPE type, double entry, double limitPx = 0)
                   type == ORDER_TYPE_BUY_STOP_LIMIT);
    bool market = (type == ORDER_TYPE_BUY || type == ORDER_TYPE_SELL);
    if(market) entry = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl  = Norm(isBuy ? entry - InpSL_USD : entry + InpSL_USD);
-   double tp  = (InpRR > 0) ? Norm(isBuy ? entry + InpSL_USD * InpRR : entry - InpSL_USD * InpRR) : 0.0;
+   double sl  = Norm(isBuy ? entry - g_SL : entry + g_SL);
+   double tp  = (InpRR > 0) ? Norm(isBuy ? entry + g_SL * InpRR : entry - g_SL * InpRR) : 0.0;
    double lot = CalcLot(isBuy, limitPx > 0 ? limitPx : entry, sl);
    string what = StringSubstr(EnumToString(type), 11);   // "BUY_STOP", "SELL_LIMIT", ...
    if(lot <= 0)
@@ -677,7 +692,7 @@ bool LevelBroken(int s, bool isBuy, double level)
    if(n <= 0) return false;
    double ext = isBuy ? r[0].high : r[0].low;
    for(int i = 1; i < n; i++) ext = isBuy ? MathMax(ext, r[i].high) : MathMin(ext, r[i].low);
-   bool broken = isBuy ? (ext >= level - InpBrokenTol_USD) : (ext <= level + InpBrokenTol_USD);
+   bool broken = isBuy ? (ext >= level - g_BrkTol) : (ext <= level + g_BrkTol);
    if(broken)
       PrintFormat("[%s] %s skipped: price already traded %s %.*f since %s (%s %.*f) - broken level, not re-entered",
                   g_name[s], isBuy ? "BUY" : "SELL", isBuy ? "up to" : "down to", _Digits, level,
@@ -694,19 +709,19 @@ void PlaceStraddle(int s, double hi, double lo)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    bool   useStopLimit = (EntryModeOf(s) == ENTRY_STOP_LIMIT && g_stopLimitOk);
-   double buyAt   = Norm(hi + InpBuffer_USD);
-   double sellAt  = Norm(lo - InpBuffer_USD);
+   double buyAt   = Norm(hi + g_Buf);
+   double sellAt  = Norm(lo - g_Buf);
 
    if(!DirOK(true)) { }
    else if(buyAt - ask > minDist && LevelBroken(s, true, buyAt)) { }
    else if(buyAt - ask > minDist)
-      SendOrder(s, useStopLimit ? ORDER_TYPE_BUY_STOP_LIMIT : ORDER_TYPE_BUY_STOP, buyAt, useStopLimit ? Norm(buyAt + InpMaxSlip_USD) : 0);
+      SendOrder(s, useStopLimit ? ORDER_TYPE_BUY_STOP_LIMIT : ORDER_TYPE_BUY_STOP, buyAt, useStopLimit ? Norm(buyAt + g_Slip) : 0);
    else PrintFormat("[%s] BUY skipped: ask %.*f is already at/above %.*f", g_name[s], _Digits, ask, _Digits, buyAt);
 
    if(!DirOK(false)) { }
    else if(bid - sellAt > minDist && LevelBroken(s, false, sellAt)) { }
    else if(bid - sellAt > minDist)
-      SendOrder(s, useStopLimit ? ORDER_TYPE_SELL_STOP_LIMIT : ORDER_TYPE_SELL_STOP, sellAt, useStopLimit ? Norm(sellAt - InpMaxSlip_USD) : 0);
+      SendOrder(s, useStopLimit ? ORDER_TYPE_SELL_STOP_LIMIT : ORDER_TYPE_SELL_STOP, sellAt, useStopLimit ? Norm(sellAt - g_Slip) : 0);
    else PrintFormat("[%s] SELL skipped: bid %.*f is already at/below %.*f", g_name[s], _Digits, bid, _Digits, sellAt);
   }
 
@@ -723,16 +738,16 @@ void CheckConfirm(int s, double hi, double lo)
 
    double c = iClose(_Symbol, InpConfirmTF, 1);
    bool isBuy = false;
-   if(c > hi + InpBuffer_USD && DirOK(true))       isBuy = true;
-   else if(c < lo - InpBuffer_USD && DirOK(false)) isBuy = false;
+   if(c > hi + g_Buf && DirOK(true))       isBuy = true;
+   else if(c < lo - g_Buf && DirOK(false)) isBuy = false;
    else return;
 
-   double level  = Norm(isBuy ? hi + InpBuffer_USD : lo - InpBuffer_USD);
+   double level  = Norm(isBuy ? hi + g_Buf : lo - g_Buf);
    double beyond = isBuy ? c - level : level - c;
-   if(InpMaxChase_USD > 0 && beyond > InpMaxChase_USD)
+   if(g_Chase > 0 && beyond > g_Chase)
      {
-      PrintFormat("[%s] %s close %.*f is $%.2f past the level (> MaxChase $%.2f) - ignored", g_name[s],
-                  isBuy ? "BUY" : "SELL", _Digits, c, beyond, InpMaxChase_USD);
+      PrintFormat("[%s] %s close %.*f is %g past the level (> MaxChase %g) - ignored", g_name[s],
+                  isBuy ? "BUY" : "SELL", _Digits, c, beyond, g_Chase);
       return;
      }
    if(!SpreadOK(s)) return;
@@ -760,7 +775,7 @@ void CheckConfirm(int s, double hi, double lo)
 // stop / freeze distance. Every move (or rejection) is written to the journal.
 void ManageStops()
   {
-   if(InpBE_Trigger_USD <= 0 && InpTrailStart_USD <= 0) return;
+   if(g_BEtrig <= 0 && g_TrStart <= 0) return;
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double guard = MathMax(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
@@ -781,17 +796,17 @@ void ManageStops()
       double newSL = sl;
       string why   = "";
       // 1) breakeven
-      if(InpBE_Trigger_USD > 0 && profit >= InpBE_Trigger_USD)
+      if(g_BEtrig > 0 && profit >= g_BEtrig)
         {
-         double be = Norm(buy ? open + InpBE_Lock_USD : open - InpBE_Lock_USD);
+         double be = Norm(buy ? open + g_BElock : open - g_BElock);
          if(newSL <= 0 || (buy ? be > newSL : be < newSL)) { newSL = be; why = "breakeven"; }
         }
       // 2) trailing stop (moves only in steps of at least TrailStep)
-      if(InpTrailStart_USD > 0 && profit >= InpTrailStart_USD)
+      if(g_TrStart > 0 && profit >= g_TrStart)
         {
-         double tr = Norm(buy ? px - InpTrailDist_USD : px + InpTrailDist_USD);
+         double tr = Norm(buy ? px - g_TrDist : px + g_TrDist);
          double gain = (newSL <= 0) ? DBL_MAX : (buy ? tr - newSL : newSL - tr);
-         if(gain >= MathMax(InpTrailStep_USD, _Point)) { newSL = tr; why = "trailing"; }
+         if(gain >= MathMax(g_TrStep, _Point)) { newSL = tr; why = "trailing"; }
         }
       if(why == "") continue;
 
@@ -801,7 +816,7 @@ void ManageStops()
 
       g_trade.SetExpertMagicNumber(mg);
       if(g_trade.PositionModify(t, newSL, tp))
-         PrintFormat("Position #%I64u SL %.*f -> %.*f (%s at +$%.2f profit)", t, _Digits, sl, _Digits, newSL, why, profit);
+         PrintFormat("Position #%I64u SL %.*f -> %.*f (%s at +%g profit)", t, _Digits, sl, _Digits, newSL, why, profit);
       else
          PrintFormat("Position #%I64u SL move to %.*f (%s) REJECTED: %u %s", t, _Digits, newSL, why,
                      g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
@@ -820,6 +835,13 @@ int Fail(string why)
 
 int OnInit()
   {
+   double pip = (_Digits == 3 || _Digits == 5) ? 10 * _Point : _Point;
+   g_unit   = (InpDistUnit == UNIT_POINTS) ? _Point : (InpDistUnit == UNIT_PIPS) ? pip : 1.0;
+   g_SL     = InpSL_USD * g_unit;          g_BEtrig = InpBE_Trigger_USD * g_unit;  g_BElock = InpBE_Lock_USD * g_unit;
+   g_TrStart= InpTrailStart_USD * g_unit;  g_TrDist = InpTrailDist_USD * g_unit;   g_TrStep = InpTrailStep_USD * g_unit;
+   g_Buf    = InpBuffer_USD * g_unit;      g_Slip   = InpMaxSlip_USD * g_unit;     g_Chase  = InpMaxChase_USD * g_unit;
+   g_Spread = InpMaxSpread_USD * g_unit;   g_BrkTol = InpBrokenTol_USD * g_unit;
+   g_MinLvl = InpMinLevelRange_USD * g_unit; g_MaxLvl = InpMaxLevelRange_USD * g_unit;
    g_tPDH        = ParseHHMM(InpPDHStart);
    g_rangeStartIn = ParseHHMM(InpRangeStart);
    g_rangeEndIn   = ParseHHMM(InpRangeEnd);
@@ -836,13 +858,16 @@ int OnInit()
       return Fail("no-trade windows must be HH:MM-HH:MM (or empty)");
    if(!InpUsePDH && !InpUseRange && !InpUse4H)    return Fail("all setups are off");
    if(InpUse4H && g_tH4From >= g_tH4To)           return Fail("H4From must be before H4To");
-   if(InpBE_Trigger_USD < 0 || InpBE_Lock_USD < 0)
+   if(g_BEtrig < 0 || g_BElock < 0)
       return Fail("breakeven values must be >= 0");
-   if(InpBE_Trigger_USD > 0 && InpBE_Lock_USD >= InpBE_Trigger_USD)
+   if(g_BEtrig > 0 && g_BElock >= g_BEtrig)
       return Fail("BE_Lock must be smaller than BE_Trigger");
-   if(InpTrailStart_USD < 0 || InpTrailStep_USD < 0) return Fail("trailing values must be >= 0");
-   if(InpTrailStart_USD > 0 && InpTrailDist_USD < 1.0)
-      return Fail("TrailDist must be at least $1.00 (100 points) - tighter trails get stopped by normal gold noise");
+   if(g_TrStart < 0 || g_TrStep < 0) return Fail("trailing values must be >= 0");
+   if(g_TrStart > 0 && g_TrDist <= 0) return Fail("TrailDist must be > 0");
+   double spr = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(g_TrStart > 0 && spr > 0 && g_TrDist < 3 * spr)
+      PrintFormat("WARNING: trail distance %g is less than 3x the current spread (%g) - normal noise will stop it out",
+                  g_TrDist, spr);
    if(InpUsePDH && g_tPDH >= g_tTradeEnd)         return Fail("PDHStart must be before TradeEnd");
    if(InpUseRange && g_rangeStartIn >= 0 && g_rangeEndIn >= 0 && g_rangeStartIn >= g_rangeEndIn)
       return Fail("RangeStart must be before RangeEnd");
@@ -850,28 +875,28 @@ int OnInit()
       return Fail("RangeEnd must be before TradeEnd");
    if(InpServerUTCWinter < -12 || InpServerUTCWinter > 14) return Fail("ServerUTCWinter must be -12..14");
    if(g_tClose >= 0 && g_tClose < g_tTradeEnd)    return Fail("CloseTime must be at or after TradeEnd");
-   if(InpSL_USD <= 0 || InpRR < 0 || InpBuffer_USD < 0 || InpMaxSpread_USD <= 0 ||
-      InpMaxSlip_USD < 0 || InpMaxChase_USD < 0 || InpMinLevelRange_USD < 0 || InpMaxLevelRange_USD < 0)
+   if(g_SL <= 0 || InpRR < 0 || g_Buf < 0 || g_Spread <= 0 ||
+      g_Slip < 0 || g_Chase < 0 || g_MinLvl < 0 || g_MaxLvl < 0)
       return Fail("SL / spread must be > 0; RR, BE, buffer, slip, chase, level filters must be >= 0");
-   if(InpMaxLevelRange_USD > 0 && InpMaxLevelRange_USD <= InpMinLevelRange_USD)
+   if(g_MaxLvl > 0 && g_MaxLvl <= g_MinLvl)
       return Fail("MaxLevelRange must be above MinLevelRange");
    if(InpRiskPct <= 0 || InpRiskPct > 5)          return Fail("RiskPct must be > 0 and <= 5");
    if(InpMaxTradesDay < 1)                        return Fail("MaxTradesDay must be >= 1");
    if(InpMinTrades < 0 || InpScoreMaxDD < 0 || InpScoreWorstR < 0) return Fail("score filters must be >= 0");
 
-   double tpDist = InpSL_USD * InpRR;
-   if(InpRR > 0 && InpBE_Trigger_USD >= tpDist)
-      PrintFormat("WARNING: breakeven at +$%.2f is at/after the TP at +$%.2f - it will never trigger", InpBE_Trigger_USD, tpDist);
-   if(InpRR > 0 && InpTrailStart_USD >= tpDist)
-      PrintFormat("WARNING: trailing starts at +$%.2f, at/after the TP at +$%.2f - it will never act (use RR 0 or a bigger RR)",
-                  InpTrailStart_USD, tpDist);
+   double tpDist = g_SL * InpRR;
+   if(InpRR > 0 && g_BEtrig >= tpDist)
+      PrintFormat("WARNING: breakeven at +%g is at/after the TP at +%g - it will never trigger", g_BEtrig, tpDist);
+   if(InpRR > 0 && g_TrStart >= tpDist)
+      PrintFormat("WARNING: trailing starts at +%g, at/after the TP at +%g - it will never act (use RR 0 or a bigger RR)",
+                  g_TrStart, tpDist);
 
    g_magic[SET_PDH]   = InpMagic + 1;
    g_magic[SET_RANGE] = InpMagic + 2;
    g_magic[SET_H4]    = InpMagic + 3;
    ChartSetInteger(0, CHART_SHOW_OBJECT_DESCR, true);   // show the level labels on the chart
    g_trade.SetTypeFillingBySymbol(_Symbol);
-   g_trade.SetDeviationInPoints((ulong)MathMax(1, MathRound(0.50 / _Point)));   // $0.50 market-order slippage
+   g_trade.SetDeviationInPoints((ulong)MathMax(10, MathRound(g_Slip / _Point)));   // market-order slippage = MaxSlip
    for(int s = 0; s < NSETS; s++) g_lastBar[s] = 0;
    g_h4Start = 0;
    g_sumR = 0; g_worstR = 0; g_nR = 0; g_openRisk = 0; g_curR = 0;
@@ -882,18 +907,19 @@ int OnInit()
    if(anyStopLimit && !g_stopLimitOk)
       Print("WARNING: broker does not allow stop-limit orders on this symbol - using plain stop orders");
 
-   PrintFormat("%s digits=%d | entry %s | SL $%.2f = %.0f points | TP %s | BE %s | risk %.2f%% | max %d trades/day",
-               _Symbol, _Digits, EnumToString(InpEntryMode), InpSL_USD, InpSL_USD / _Point,
-               InpRR > 0 ? StringFormat("$%.2f", InpSL_USD * InpRR) : "off",
-               InpBE_Trigger_USD > 0 ? StringFormat("at +$%.2f (%.0f pts)", InpBE_Trigger_USD, InpBE_Trigger_USD / _Point) : "off",
+   PrintFormat("%s digits=%d point=%g | distances in %s (1 unit = %g price) | entry %s | SL %g = %.0f points | TP %s | BE %s | risk %.2f%% | max %d trades/day",
+               _Symbol, _Digits, _Point, StringSubstr(EnumToString(InpDistUnit), 5), g_unit,
+               EnumToString(InpEntryMode), g_SL, g_SL / _Point,
+               InpRR > 0 ? StringFormat("%g", g_SL * InpRR) : "off",
+               g_BEtrig > 0 ? StringFormat("at +%g (%.0f pts)", g_BEtrig, g_BEtrig / _Point) : "off",
                InpRiskPct, InpMaxTradesDay);
    for(int s = 0; s < NSETS; s++)
       if(SetEnabled(s))
          PrintFormat("[%s] entry %s - confirmation %s", g_name[s], EnumToString(EntryModeOf(s)),
                      UsesConfirmation(s) ? StringFormat("ON (%s candle close)", StringSubstr(EnumToString(InpConfirmTF), 7)) : "OFF");
-   PrintFormat("Trailing %s", InpTrailStart_USD > 0 ?
-               StringFormat("from +$%.2f (%.0f pts), $%.2f (%.0f pts) behind price, step $%.2f", InpTrailStart_USD,
-                            InpTrailStart_USD / _Point, InpTrailDist_USD, InpTrailDist_USD / _Point, InpTrailStep_USD) : "off");
+   PrintFormat("Trailing %s", g_TrStart > 0 ?
+               StringFormat("from +%g (%.0f pts), %g (%.0f pts) behind price, step %g", g_TrStart,
+                            g_TrStart / _Point, g_TrDist, g_TrDist / _Point, g_TrStep) : "off");
    PrintFormat("4H straddle %s",
                InpUse4H ? StringFormat("ON for H4 candles %s-%s", InpH4From, InpH4To) : "off");
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",

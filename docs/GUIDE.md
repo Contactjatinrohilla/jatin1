@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_60_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_70_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -265,10 +265,10 @@ At startup the journal prints each setup's entry and whether confirmation is ON 
 
 | File | Use | Passes |
 |---|---|---|
-| `v7_60_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
-| `v7_60_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
-| `v7_60_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
-| `v7_60_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+| `v7_70_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_70_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_70_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_70_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
 
 Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
 **Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
@@ -292,7 +292,7 @@ gold brokers). IST has no summer time, so the same IST window moves by one hour 
 |---|---|---|
 | 12:30–14:30 | 10:00–12:00 server | 09:00–11:00 server |
 
-Preset: `v7_60_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
+Preset: `v7_70_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
 show **IST − 2:30**; in winter **IST − 3:30**. If it doesn't, change `InpServerUTCWinter` / `InpServerDST`.
 Note: 12:30 IST = 07:00 UTC, which is the London open in summer but one hour before it in winter.
 
@@ -324,8 +324,8 @@ SL the lot is 0.02, so 50% = 0.01 works, but 25% = 0.005 rounds to 0 and that pa
 so). Use a bigger balance in the tester, or `InpTP1_Pct = 50` with no TP2. The Custom max statistics count a trade's
 partial closes as one trade.
 
-Presets: `v7_60_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
-and `v7_60_opt2_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
+Presets: `v7_70_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
+and `v7_70_opt2_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
 
 ## 13. v7.31: don't re-trade a level that was already broken
 
@@ -406,3 +406,27 @@ $5–25 × distance $1–11, 30 passes), plus `opt1_exits`, `opt3_entry`, `range
 SL $1–20, TP 0–5R, breakeven 0–$30, lock 0–$2, trail start 0–$40, trail distance $1–20 (minimum allowed), trail step
 0–$2, risk 0.1–2%. Ticked inputs use a coarser step so a run stays small: `opt1_exits` = SL $2–14 × TP 1–3R ×
 breakeven 0/$5/$10 (105 passes), `opt2_trail` = trail start $5–25 × distance $1–11 (30 passes).
+
+## 17. v7.70: NAS100 / US tech indices and forex
+
+The EA now works on any symbol. **`InpDistUnit`** (section 0) sets the unit of **every** distance input (SL, BE,
+trail, spread, slip, chase, buffer, broken tolerance, level-range filter):
+
+| `InpDistUnit` | Use for | 1 unit = |
+|---|---|---|
+| 0 PRICE (default) | XAUUSD, NAS100/USTEC/US100, US30, GER40 | 1.0 of price ($1 gold, 1 index point) |
+| 1 POINTS | anything, if you think in MT5 points | the symbol's smallest step |
+| 2 PIPS | forex (EURUSD, GBPUSD, USDJPY…) | 10 points on 5- and 3-digit pairs (0.0001 / 0.01) |
+
+Lot size, sessions, PDH/range/4H, the daily loss stop and the score are already symbol-independent. Lots come from
+the broker's own profit calculation, so contract size and account currency are handled. Attach the EA to each
+symbol's chart; trades and setups are kept per symbol, and the daily loss stop applies to the whole account.
+
+| Preset | Settings |
+|---|---|
+| `v7_70_NAS100.set` | PRICE units; PDH from 16:30 server (NY open); range 16:30–17:30 server (first NY hour = 09:30–10:30 New York, all year on a UTC+2/+3 server); SL 50 pts, TP 2R, BE +50 pts (+2), max spread 3 pts, slip 5, chase 20; entries until 22:00, close 22:45 |
+| `v7_70_EURUSD.set` | PIPS; PDH from 10:00 (London open); Asian range 03:00–10:00 server; SL 15 pips, TP 2R, BE +15 pips (+1), max spread 1.5 pips, slip 1, chase 5; entries until 20:00, close 22:15 |
+
+These are starting points, not tested settings. Backtest each on its own symbol with 100% real ticks and optimise
+with `opt1_exits`-style ranges in that symbol's units. Check that your broker's index CFD (e.g. `USTEC`, `NAS100`,
+`US100.cash`) shows the NY cash open at 16:30 server time.
