@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.40                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.41                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -43,8 +43,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.40"
-#property version   "7.40"
+#property copyright "XAUUSD Simple Breakout v7.41"
+#property version   "7.41"
 
 #include <Trade\Trade.mqh>
 
@@ -858,7 +858,11 @@ void ManageStops()
       bool   tpt    = (InpTP1_R > 0 && t == g_ptTicket);
       if(InpBE_Trigger_USD > 0 && profit >= InpBE_Trigger_USD)
         { target = Norm(buy ? open + InpBE_Lock_USD : open - InpBE_Lock_USD); why = "breakeven"; }
-      if(tpt && g_ptStage >= 1 && InpTP1_MoveBE)          { target = Norm(open); why = "TP1 -> breakeven"; }
+      if(tpt && g_ptStage >= 1 && InpTP1_MoveBE)
+        {
+         double be = Norm(buy ? open + InpBE_Lock_USD : open - InpBE_Lock_USD);
+         if(target == 0 || (buy ? be > target : be < target)) { target = be; why = "TP1 -> breakeven"; }
+        }
       if(tpt && g_ptStage >= 2 && InpTP2_LockTP1)
         {
          double lk = Norm(buy ? open + InpTP1_R * InpSL_USD : open - InpTP1_R * InpSL_USD);
@@ -867,13 +871,21 @@ void ManageStops()
       double tr = TrailTarget(buy, bid, ask, profit);
       if(tr > 0 && (target == 0 || (buy ? tr > target : tr < target))) { target = tr; why = "trail"; }
       if(target == 0) continue;
-      if(buy ? (bid - target <= minDist) : (target - ask <= minDist)) continue;          // too close for the broker
+      // Broker stop / freeze level: the SL must stay this far from price. Move it to the closest
+      // allowed level instead of skipping the update.
+      double frz   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+      double guard = MathMax(minDist, frz) + _Point;
+      if(buy ? (bid - target < guard) : (target - ask < guard))
+         target = Norm(buy ? bid - guard : ask + guard);
       double gain = (sl <= 0) ? DBL_MAX : (buy ? target - sl : sl - target);
       double step = (why == "trail") ? MathMax(InpTrailStep_USD, _Point) : _Point / 2;
       if(gain < step) continue;                                                          // not an improvement
       g_trade.SetExpertMagicNumber(mg);
       if(g_trade.PositionModify(t, target, tp))
-         PrintFormat("Position #%I64u SL -> %.*f (%s, +$%.2f in profit)", t, _Digits, target, why, profit);
+         PrintFormat("Position #%I64u SL %.*f -> %.*f (%s, +$%.2f in profit)", t, _Digits, sl, _Digits, target, why, profit);
+      else
+         PrintFormat("Position #%I64u SL move to %.*f (%s) REJECTED: %u %s", t, _Digits, target, why,
+                     g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
      }
   }
 
