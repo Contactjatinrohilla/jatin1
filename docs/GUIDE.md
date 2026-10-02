@@ -430,3 +430,10 @@ symbol's chart; trades and setups are kept per symbol, and the daily loss stop a
 These are starting points, not tested settings. Backtest each on its own symbol with 100% real ticks and optimise
 with `opt1_exits`-style ranges in that symbol's units. Check that your broker's index CFD (e.g. `USTEC`, `NAS100`,
 `US100.cash`) shows the NY cash open at 16:30 server time.
+
+## 18. v7.71: one trade at a time in CLOSE mode
+
+In CLOSE mode (`InpEntryMode=2`) two setups could confirm on the same candle (e.g. RANGE and 4H breaking the same
+high) and both sent a market order on the same tick, so two positions opened together at double the risk. A
+2020–2021 test showed 111 such doubled entries. Now the setup loop stops as soon as one entry is open, so only the
+first setup trades. STOP and RETEST modes were not affected, because a filled pending order already deletes the others.
