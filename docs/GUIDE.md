@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_23_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_30_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -265,10 +265,10 @@ At startup the journal prints each setup's entry and whether confirmation is ON 
 
 | File | Use | Passes |
 |---|---|---|
-| `v7_23_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
-| `v7_23_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
-| `v7_23_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
-| `v7_23_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+| `v7_30_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_30_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_30_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_30_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
 
 Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
 **Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
@@ -292,6 +292,37 @@ gold brokers). IST has no summer time, so the same IST window moves by one hour 
 |---|---|---|
 | 12:30–14:30 | 10:00–12:00 server | 09:00–11:00 server |
 
-Preset: `v7_23_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
+Preset: `v7_30_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
 show **IST − 2:30**; in winter **IST − 3:30**. If it doesn't, change `InpServerUTCWinter` / `InpServerDST`.
 Note: 12:30 IST = 07:00 UTC, which is the London open in summer but one hour before it in winter.
+
+## 12. v7.30: multiple take profits and earlier trailing
+
+**Why the ATR trail felt late:** with gold above $4,000, ATR(H1) is often $15–25, so `ATR × 2` put the stop $30–50
+behind price. A +$40 trade could reverse all the way back. Use `InpTrailMaxDist_USD` (e.g. 8–10) to cap it, or one
+of the new modes.
+
+### New trailing modes (`InpTrailMode`)
+| Mode | How the stop follows | Inputs |
+|---|---|---|
+| 3 LOCK | Keeps a fixed % of the open profit. At +$40 with 50% the stop is +$20 | `InpTrailLockPct` |
+| 4 CANDLE | Behind the low (buy) / high (sell) of the last N closed candles | `InpTrailCandleTF` (M15), `InpTrailCandleBars` (2), `InpTrailCandleBuf_USD` (0.5) |
+
+All modes start at `InpTrailStart_R` and stay between `InpTrailMinDist_USD` ($2) and `InpTrailMaxDist_USD` (0 = no limit).
+
+### Multiple take profits (section 3b)
+| Input | Example | Meaning |
+|---|---|---|
+| `InpTP1_R` / `InpTP1_Pct` | 1.0 / 50 | At +1R close 50% of the original lot |
+| `InpTP1_MoveBE` | true | Then move the SL to entry (the rest can't lose) |
+| `InpTP2_R` / `InpTP2_Pct` | 2.0 / 25 | At +2R close another 25% |
+| `InpTP2_LockTP1` | true | Then move the SL to the TP1 price (+1R locked) |
+| `InpRR` | 0 | Final 25%: no fixed TP, it rides the trail (or set e.g. 3 for a final TP) |
+
+TP1/TP2 must be below `InpRR` unless `InpRR = 0`. **Small lots can't be split:** with 0.5% risk on $5,000 and a $10
+SL the lot is 0.02, so 50% = 0.01 works, but 25% = 0.005 rounds to 0 and that partial is skipped (the journal says
+so). Use a bigger balance in the tester, or `InpTP1_Pct = 50` with no TP2. The Custom max statistics count a trade's
+partial closes as one trade.
+
+Presets: `v7_30_multiTP_early_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
+and `v7_30_opt4_tp_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).

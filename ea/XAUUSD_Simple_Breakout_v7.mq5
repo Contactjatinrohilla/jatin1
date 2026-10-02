@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.23                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.30                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -29,8 +29,10 @@
 //|     filter, direction switch.                                    |
 //|   - Orders deleted at TradeEnd, trades closed at CloseTime.       |
 //|   - Daily loss stop on closed + open P/L. Optional breakeven.     |
-//|   - Optional trailing stop: distance in R (x SL) or x ATR, never  |
-//|     closer than TrailMinDist (no micro-trailing).                 |
+//|   - Optional trailing stop: R distance, ATR, lock % of profit or  |
+//|     behind the last candles; min and max distance from price.     |
+//|   - Optional multiple take profits: TP1 / TP2 partial closes      |
+//|     (then breakeven / lock at TP1), the rest runs to TP or trail. |
 //|                                                                  |
 //|  OPTIMISATION: select "Custom max" in the Strategy Tester and     |
 //|  pick what to maximise with InpScore (section 7).                 |
@@ -40,8 +42,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.23"
-#property version   "7.23"
+#property copyright "XAUUSD Simple Breakout v7.30"
+#property version   "7.30"
 
 #include <Trade\Trade.mqh>
 
@@ -94,7 +96,9 @@ enum ENUM_TRAIL_MODE
   {
    TRAIL_OFF = 0, // Off
    TRAIL_R   = 1, // Distance = TrailDist_R x SL
-   TRAIL_ATR = 2  // Distance = ATR x TrailATR_Mult
+   TRAIL_ATR = 2, // Distance = ATR x TrailATR_Mult
+   TRAIL_LOCK = 3, // Lock TrailLockPct % of the open profit (moves early)
+   TRAIL_CANDLE = 4 // Behind the low/high of the last TrailCandleBars candles
   };
 
 enum ENUM_SCORE
@@ -146,8 +150,21 @@ input double InpTrailDist_R     = 1.0;      // Trail (R mode): distance behind p
 input ENUM_TIMEFRAMES InpTrailATR_TF = PERIOD_H1; // Trail (ATR mode): ATR timeframe
 input int    InpTrailATR_Period = 14;       // Trail (ATR mode): ATR period
 input double InpTrailATR_Mult   = 2.0;      // Trail (ATR mode): distance = ATR x this
+input double InpTrailLockPct    = 50.0;     // Trail (LOCK mode): keep this % of the open profit
+input ENUM_TIMEFRAMES InpTrailCandleTF = PERIOD_M15; // Trail (CANDLE mode): candle timeframe
+input int    InpTrailCandleBars = 2;        // Trail (CANDLE mode): behind the low/high of this many closed candles
+input double InpTrailCandleBuf_USD = 0.50;  // Trail (CANDLE mode): extra distance beyond that low/high
 input double InpTrailMinDist_USD = 2.00;    // Trail: never closer than this to price
+input double InpTrailMaxDist_USD = 0.00;    // Trail: never further than this from price (0 = no limit)
 input double InpTrailStep_USD   = 0.50;     // Trail: move SL only in steps of at least this
+
+input group "=== 3b. Multiple take profits (partial closes) ==="
+input double InpTP1_R           = 0.0;      // TP1 at this many R (0 = off)
+input double InpTP1_Pct         = 50.0;     // TP1: close this % of the original lot
+input bool   InpTP1_MoveBE      = true;     // After TP1: move SL to entry
+input double InpTP2_R           = 0.0;      // TP2 at this many R (0 = off, needs TP1)
+input double InpTP2_Pct         = 25.0;     // TP2: close this % of the original lot
+input bool   InpTP2_LockTP1     = true;     // After TP2: move SL to the TP1 price
 
 input group "=== 4. Filters ==="
 input bool   InpTradeMon        = true;     // Trade Monday
@@ -206,6 +223,10 @@ double   g_dayStartBal = 0;
 bool     g_recount     = true;
 double   g_rangeHi     = 0, g_rangeLo = 0;
 double   g_openRisk    = 0;    // money risked by the open trade (for R statistics)
+double   g_curR        = 0;    // R collected so far by the open trade (partials add up)
+ulong    g_ptTicket    = 0;    // position tracked for partial take profits
+double   g_ptVol0      = 0;    // its original volume
+int      g_ptStage     = 0;    // 0 = none taken, 1 = TP1 taken, 2 = TP2 taken
 double   g_sumR        = 0, g_worstR = 0;
 int      g_nR          = 0;
 
@@ -734,29 +755,103 @@ void CheckConfirm(int s, double hi, double lo)
    if(sent) g_used[s] = true;
   }
 
-// Trailing distance in USD for the current tick (0 = trailing off / not available).
-double TrailDistance()
+double VolStep() { double v = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP); return v > 0 ? v : 0.01; }
+double VolDown(double v) { double st = VolStep(); return NormalizeDouble(MathFloor(v / st + 1e-9) * st, 8); }
+
+// Original volume of a position (its entry deal), so partial closes are sized from it.
+double InitialVolume(ulong posTicket, double fallback)
   {
-   double d = 0;
-   if(InpTrailMode == TRAIL_R) d = InpTrailDist_R * InpSL_USD;
-   else if(InpTrailMode == TRAIL_ATR && g_atr != INVALID_HANDLE)
+   if(!HistorySelectByPosition(posTicket)) return fallback;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
      {
-      double b[];
-      if(CopyBuffer(g_atr, 0, 1, 1, b) == 1 && b[0] > 0) d = b[0] * InpTrailATR_Mult;
+      ulong d = HistoryDealGetTicket(i);
+      if(d > 0 && HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_IN) return HistoryDealGetDouble(d, DEAL_VOLUME);
      }
-   return (d > 0) ? MathMax(d, InpTrailMinDist_USD) : 0;
+   return fallback;
   }
 
-// Breakeven (at InpBE_R) and trailing stop (from InpTrailStart_R). The SL only ever moves
-// in the trade's favour, by at least InpTrailStep_USD, and respects the broker stop level.
+// TP1 / TP2 partial closes. Returns false if the position is gone. Stage survives restarts
+// (re-derived from the remaining volume).
+bool ManagePartials(ulong t, bool buy, double open, double profit, double vol)
+  {
+   if(InpTP1_R <= 0) return true;
+   if(t != g_ptTicket)
+     {
+      g_ptTicket = t;
+      g_ptVol0   = InitialVolume(t, vol);
+      double afterTP1 = g_ptVol0 - VolDown(g_ptVol0 * InpTP1_Pct / 100.0);
+      g_ptStage  = (vol < g_ptVol0 - VolStep() / 2) ? ((InpTP2_R > 0 && vol < afterTP1 - VolStep() / 2) ? 2 : 1) : 0;
+     }
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   for(int k = 0; k < 2; k++)
+     {
+      int    stage = g_ptStage;
+      double lvl   = (stage == 0) ? InpTP1_R : (stage == 1 && InpTP2_R > 0) ? InpTP2_R : 0;
+      if(lvl <= 0 || profit < lvl * InpSL_USD) break;
+      double pct = (stage == 0) ? InpTP1_Pct : InpTP2_Pct;
+      double cv  = VolDown(g_ptVol0 * pct / 100.0);
+      g_ptStage  = stage + 1;
+      if(cv < vmin || vol - cv < vmin - 1e-9)
+        {
+         PrintFormat("TP%d at %.1fR reached - lot %.2f too small to split (%.0f%% = %.2f), nothing closed",
+                     stage + 1, lvl, vol, pct, cv);
+         continue;
+        }
+      g_trade.SetExpertMagicNumber((ulong)PositionGetInteger(POSITION_MAGIC));
+      if(g_trade.PositionClosePartial(t, cv))
+        {
+         PrintFormat("TP%d at +%.1fR: closed %.2f of %.2f lot", stage + 1, lvl, cv, g_ptVol0);
+         vol -= cv;
+         if(!PositionSelectByTicket(t)) return false;
+        }
+      else
+        {
+         g_ptStage = stage;   // retry next tick
+         PrintFormat("TP%d partial close FAILED: %s", stage + 1, g_trade.ResultRetcodeDescription());
+         break;
+        }
+     }
+   return true;
+  }
+
+// Trailing stop level for one position (0 = no trail level now).
+double TrailTarget(bool buy, double open, double bid, double ask, double profit)
+  {
+   if(InpTrailMode == TRAIL_OFF || profit < InpTrailStart_R * InpSL_USD) return 0;
+   double px = buy ? bid : ask, tr = 0;
+   if(InpTrailMode == TRAIL_R)
+      tr = buy ? px - InpTrailDist_R * InpSL_USD : px + InpTrailDist_R * InpSL_USD;
+   else if(InpTrailMode == TRAIL_ATR)
+     {
+      double b[];
+      if(g_atr == INVALID_HANDLE || CopyBuffer(g_atr, 0, 1, 1, b) != 1 || b[0] <= 0) return 0;
+      tr = buy ? px - b[0] * InpTrailATR_Mult : px + b[0] * InpTrailATR_Mult;
+     }
+   else if(InpTrailMode == TRAIL_LOCK)
+      tr = buy ? open + profit * InpTrailLockPct / 100.0 : open - profit * InpTrailLockPct / 100.0;
+   else if(InpTrailMode == TRAIL_CANDLE)
+     {
+      MqlRates r[];
+      if(CopyRates(_Symbol, InpTrailCandleTF, 1, InpTrailCandleBars, r) != InpTrailCandleBars) return 0;
+      double ext = buy ? r[0].low : r[0].high;
+      for(int i = 1; i < InpTrailCandleBars; i++) ext = buy ? MathMin(ext, r[i].low) : MathMax(ext, r[i].high);
+      tr = buy ? ext - InpTrailCandleBuf_USD : ext + InpTrailCandleBuf_USD;
+     }
+   // keep the stop between MinDist and MaxDist away from price
+   if(buy) { tr = MathMin(tr, px - InpTrailMinDist_USD); if(InpTrailMaxDist_USD > 0) tr = MathMax(tr, px - InpTrailMaxDist_USD); }
+   else    { tr = MathMax(tr, px + InpTrailMinDist_USD); if(InpTrailMaxDist_USD > 0) tr = MathMin(tr, px + InpTrailMaxDist_USD); }
+   return Norm(tr);
+  }
+
+// Partial take profits, breakeven, TP1/TP2 locks and the trailing stop. The SL only ever
+// moves in the trade's favour (trail in steps of at least InpTrailStep_USD) and respects
+// the broker stop level.
 void ManageStops()
   {
-   bool trailOn = (InpTrailMode != TRAIL_OFF);
-   if(InpBE_R <= 0 && !trailOn) return;
+   if(InpBE_R <= 0 && InpTrailMode == TRAIL_OFF && InpTP1_R <= 0) return;
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double trailDist = trailOn ? TrailDistance() : 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
@@ -765,18 +860,23 @@ void ManageStops()
       if(!IsOurMagic(mg)) continue;
       bool   buy    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
       double open   = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl     = PositionGetDouble(POSITION_SL);
-      double tp     = PositionGetDouble(POSITION_TP);
       double profit = buy ? bid - open : open - ask;      // in USD of price
+      if(!ManagePartials(t, buy, open, profit, PositionGetDouble(POSITION_VOLUME))) continue;
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
       double target = 0;                                 // best SL allowed now (0 = none)
       string why    = "";
-
-      if(InpBE_R > 0 && profit >= InpBE_R * InpSL_USD) { target = Norm(open); why = "breakeven"; }
-      if(trailDist > 0 && profit >= InpTrailStart_R * InpSL_USD)
+      bool   tpt    = (InpTP1_R > 0 && t == g_ptTicket);
+      if(InpBE_R > 0 && profit >= InpBE_R * InpSL_USD)  { target = Norm(open); why = "breakeven"; }
+      if(tpt && g_ptStage >= 1 && InpTP1_MoveBE)          { target = Norm(open); why = "TP1 -> breakeven"; }
+      if(tpt && g_ptStage >= 2 && InpTP2_LockTP1)
         {
-         double tr = Norm(buy ? bid - trailDist : ask + trailDist);
-         if(target == 0 || (buy ? tr > target : tr < target)) { target = tr; why = "trail"; }
+         double lk = Norm(buy ? open + InpTP1_R * InpSL_USD : open - InpTP1_R * InpSL_USD);
+         if(target == 0 || (buy ? lk > target : lk < target)) { target = lk; why = "TP2 -> lock at TP1"; }
         }
+      double tr = TrailTarget(buy, open, bid, ask, profit);
+      if(tr > 0 && (target == 0 || (buy ? tr > target : tr < target))) { target = tr; why = "trail"; }
       if(target == 0) continue;
       if(buy ? (bid - target <= minDist) : (target - ask <= minDist)) continue;          // too close for the broker
       double gain = (sl <= 0) ? DBL_MAX : (buy ? target - sl : sl - target);
@@ -819,6 +919,16 @@ int OnInit()
    if(InpTrailMode != TRAIL_OFF && (InpTrailStart_R <= 0 || InpTrailMinDist_USD < 0.5 || InpTrailStep_USD < 0))
       return Fail("trail: Start_R must be > 0, MinDist >= $0.50 (no micro-trailing), Step >= 0");
    if(InpTrailMode == TRAIL_R && InpTrailDist_R <= 0)  return Fail("TrailDist_R must be > 0");
+   if(InpTrailMode == TRAIL_LOCK && (InpTrailLockPct <= 0 || InpTrailLockPct >= 100)) return Fail("TrailLockPct must be 1-99");
+   if(InpTrailMode == TRAIL_CANDLE && (InpTrailCandleBars < 1 || InpTrailCandleBuf_USD < 0)) return Fail("TrailCandleBars >= 1, buffer >= 0");
+   if(InpTrailMaxDist_USD < 0 || (InpTrailMaxDist_USD > 0 && InpTrailMaxDist_USD < InpTrailMinDist_USD))
+      return Fail("TrailMaxDist must be 0 (off) or >= TrailMinDist");
+   if(InpTP1_R < 0 || InpTP2_R < 0) return Fail("TP1_R / TP2_R must be >= 0");
+   if(InpTP1_R > 0 && (InpTP1_Pct <= 0 || InpTP1_Pct >= 100)) return Fail("TP1_Pct must be 1-99");
+   if(InpTP2_R > 0 && (InpTP1_R <= 0 || InpTP2_R <= InpTP1_R || InpTP2_Pct <= 0 || InpTP1_Pct + InpTP2_Pct >= 100))
+      return Fail("TP2 needs TP1, TP2_R > TP1_R and TP1_Pct + TP2_Pct < 100");
+   if(InpRR > 0 && InpTP1_R > 0 && (InpTP1_R >= InpRR || InpTP2_R >= InpRR))
+      return Fail("TP1 / TP2 must be below the final TP (InpRR) - or set InpRR = 0 to let the rest run");
    if(InpTrailMode == TRAIL_ATR && (InpTrailATR_Period < 1 || InpTrailATR_Mult <= 0))
       return Fail("ATR trail needs Period >= 1 and Mult > 0");
    if(InpUsePDH && g_tPDH >= g_tTradeEnd)         return Fail("PDHStart must be before TradeEnd");
@@ -856,7 +966,7 @@ int OnInit()
    g_trade.SetDeviationInPoints((ulong)MathMax(1, MathRound(0.50 / _Point)));   // $0.50 market-order slippage
    for(int s = 0; s < NSETS; s++) g_lastBar[s] = 0;
    g_h4Start = 0;
-   g_sumR = 0; g_worstR = 0; g_nR = 0; g_openRisk = 0;
+   g_sumR = 0; g_worstR = 0; g_nR = 0; g_openRisk = 0; g_curR = 0; g_ptTicket = 0;
 
    g_stopLimitOk = (SymbolInfoInteger(_Symbol, SYMBOL_ORDER_MODE) & SYMBOL_ORDER_STOP_LIMIT) != 0;
    bool anyStopLimit = false;
@@ -872,6 +982,10 @@ int OnInit()
       if(SetEnabled(s))
          PrintFormat("[%s] entry %s - confirmation %s", g_name[s], EnumToString(EntryModeOf(s)),
                      UsesConfirmation(s) ? StringFormat("ON (%s candle close)", StringSubstr(EnumToString(InpConfirmTF), 7)) : "OFF");
+   if(InpTP1_R > 0)
+      PrintFormat("Take profits: TP1 %.0f%% at %.1fR%s%s | rest -> %s", InpTP1_Pct, InpTP1_R, InpTP1_MoveBE ? " (then SL to entry)" : "",
+                  InpTP2_R > 0 ? StringFormat(" | TP2 %.0f%% at %.1fR%s", InpTP2_Pct, InpTP2_R, InpTP2_LockTP1 ? " (then SL to TP1)" : "") : "",
+                  InpRR > 0 ? StringFormat("final TP %.1fR", InpRR) : "trail / close time");
    PrintFormat("Trail %s | 4H straddle %s", EnumToString(InpTrailMode),
                InpUse4H ? StringFormat("ON for H4 candles %s-%s", InpH4From, InpH4To) : "off");
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",
@@ -952,16 +1066,26 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       !IsOurMagic((ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC))) return;
    long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
    if(entry == DEAL_ENTRY_IN)
+     {
       g_openRisk = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0;
+      g_curR     = 0;
+     }
    else if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && g_openRisk > 0)
      {
       double p = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
                  HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
-      double r = p / g_openRisk;
-      g_sumR  += r;
-      g_nR++;
-      g_worstR = MathMin(g_worstR, r);
-      PrintFormat("CLOSED %s %+.2f = %+.2fR", HistoryDealGetString(trans.deal, DEAL_COMMENT), p, r);
+      g_curR += p / g_openRisk;
+      ulong pos = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+      if(PositionSelectByTicket(pos))
+         PrintFormat("PARTIAL %s %+.2f (trade so far %+.2fR)", HistoryDealGetString(trans.deal, DEAL_COMMENT), p, g_curR);
+      else
+        {
+         g_sumR  += g_curR;            // one trade = all of its partial closes together
+         g_nR++;
+         g_worstR = MathMin(g_worstR, g_curR);
+         PrintFormat("CLOSED %s %+.2f | whole trade %+.2fR", HistoryDealGetString(trans.deal, DEAL_COMMENT), p, g_curR);
+         g_curR = 0;
+        }
      }
   }
 
