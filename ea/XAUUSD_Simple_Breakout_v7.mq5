@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.20                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.21                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -11,7 +11,8 @@
 //|           new straddle each H4 candle that opens inside the       |
 //|           H4From-H4To window; unfilled orders end with the candle.|
 //|                                                                  |
-//|  ENTRY MODES (InpEntryMode - optimisable)                        |
+//|  ENTRY MODES (InpEntryMode, per-setup override - optimisable)    |
+//|   Confirmation OFF = 0 STOP / 1 STOP-LIMIT; ON = 2 CLOSE / 3 RETEST |
 //|   0 STOP        BUY STOP above the high, SELL STOP below the low  |
 //|   1 STOP-LIMIT  same, but never fills more than MaxSlip past the  |
 //|                 level (spike fills are skipped, not taken)        |
@@ -39,8 +40,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.20"
-#property version   "7.20"
+#property copyright "XAUUSD Simple Breakout v7.21"
+#property version   "7.21"
 
 #include <Trade\Trade.mqh>
 
@@ -50,6 +51,15 @@ enum ENUM_ENTRY_MODE
    ENTRY_STOP_LIMIT = 1, // Stop-limit: skip fills worse than MaxSlip
    ENTRY_CLOSE      = 2, // Market order after a candle CLOSES beyond the level
    ENTRY_RETEST     = 3  // Limit order back at the level after a close beyond it
+  };
+
+enum ENUM_ENTRY_OVERRIDE
+  {
+   EO_DEFAULT    = 0, // Same as Entry mode
+   EO_STOP       = 1, // Confirmation OFF: stop order
+   EO_STOP_LIMIT = 2, // Confirmation OFF: stop-limit
+   EO_CLOSE      = 3, // Confirmation ON: candle close, market order
+   EO_RETEST     = 4  // Confirmation ON: candle close, then retest limit
   };
 
 enum ENUM_DIRECTION
@@ -98,7 +108,10 @@ input string InpCloseTime       = "22:15";  // Close open trades at (see CloseMo
 input ENUM_CLOSE_MODE InpCloseMode = CLOSE_DAILY; // When CloseTime applies
 
 input group "=== 2. Entry ==="
-input ENUM_ENTRY_MODE InpEntryMode = ENTRY_STOP; // Entry mode
+input ENUM_ENTRY_MODE InpEntryMode = ENTRY_STOP; // Entry mode (0/1 = confirmation OFF, 2/3 = ON)
+input ENUM_ENTRY_OVERRIDE InpEntryPDH   = EO_DEFAULT; // PDH setup entry
+input ENUM_ENTRY_OVERRIDE InpEntryRange = EO_DEFAULT; // RANGE setup entry
+input ENUM_ENTRY_OVERRIDE InpEntryH4    = EO_DEFAULT; // 4H setup entry
 input ENUM_DIRECTION  InpDirection = DIR_BOTH;   // Direction
 input ENUM_TIMEFRAMES InpConfirmTF = PERIOD_M5;  // Candle for CLOSE / RETEST modes
 input double InpBuffer_USD      = 0.00;     // Entry this far beyond the level
@@ -226,6 +239,16 @@ bool IsOurMagic(ulong m) { return m == g_magic[SET_PDH] || m == g_magic[SET_RANG
 int  SetOf(ulong m)      { return (m == g_magic[SET_PDH]) ? SET_PDH : (m == g_magic[SET_RANGE]) ? SET_RANGE : SET_H4; }
 bool SetEnabled(int s)   { return s == SET_PDH ? InpUsePDH : s == SET_RANGE ? InpUseRange : InpUse4H; }
 bool DirOK(bool isBuy)   { return InpDirection == DIR_BOTH || (isBuy ? InpDirection == DIR_BUY : InpDirection == DIR_SELL); }
+// Entry mode of setup s: its own override, or the global InpEntryMode.
+ENUM_ENTRY_MODE EntryModeOf(int s)
+  {
+   ENUM_ENTRY_OVERRIDE o = (s == SET_PDH) ? InpEntryPDH : (s == SET_RANGE) ? InpEntryRange : InpEntryH4;
+   if(o == EO_DEFAULT) return InpEntryMode;
+   return (ENUM_ENTRY_MODE)((int)o - 1);
+  }
+
+bool UsesConfirmation(int s) { ENUM_ENTRY_MODE m = EntryModeOf(s); return m == ENTRY_CLOSE || m == ENTRY_RETEST; }
+
 // Time from which setup s may enter (PDH / RANGE: today's start time; H4: the current H4 candle).
 datetime ActiveTime(int s)
   {
@@ -567,7 +590,7 @@ void PlaceStraddle(int s, double hi, double lo)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   bool   useStopLimit = (InpEntryMode == ENTRY_STOP_LIMIT && g_stopLimitOk);
+   bool   useStopLimit = (EntryModeOf(s) == ENTRY_STOP_LIMIT && g_stopLimitOk);
    double buyAt   = Norm(hi + InpBuffer_USD);
    double sellAt  = Norm(lo - InpBuffer_USD);
 
@@ -612,7 +635,7 @@ void CheckConfirm(int s, double hi, double lo)
                StringSubstr(EnumToString(InpConfirmTF), 7), _Digits, c, _Digits, level);
 
    bool sent;
-   if(InpEntryMode == ENTRY_CLOSE)
+   if(EntryModeOf(s) == ENTRY_CLOSE)
       sent = SendOrder(s, isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, 0);
    else
      {
@@ -744,13 +767,19 @@ int OnInit()
    g_sumR = 0; g_worstR = 0; g_nR = 0; g_openRisk = 0;
 
    g_stopLimitOk = (SymbolInfoInteger(_Symbol, SYMBOL_ORDER_MODE) & SYMBOL_ORDER_STOP_LIMIT) != 0;
-   if(InpEntryMode == ENTRY_STOP_LIMIT && !g_stopLimitOk)
+   bool anyStopLimit = false;
+   for(int s = 0; s < NSETS; s++) if(SetEnabled(s) && EntryModeOf(s) == ENTRY_STOP_LIMIT) anyStopLimit = true;
+   if(anyStopLimit && !g_stopLimitOk)
       Print("WARNING: broker does not allow stop-limit orders on this symbol - using plain stop orders");
 
    PrintFormat("%s digits=%d | entry %s | SL $%.2f = %.0f points | TP %s | BE %s | risk %.2f%% | max %d trades/day",
                _Symbol, _Digits, EnumToString(InpEntryMode), InpSL_USD, InpSL_USD / _Point,
                InpRR > 0 ? StringFormat("$%.2f", InpSL_USD * InpRR) : "off",
                InpBE_R > 0 ? StringFormat("at +$%.2f", InpSL_USD * InpBE_R) : "off", InpRiskPct, InpMaxTradesDay);
+   for(int s = 0; s < NSETS; s++)
+      if(SetEnabled(s))
+         PrintFormat("[%s] entry %s - confirmation %s", g_name[s], EnumToString(EntryModeOf(s)),
+                     UsesConfirmation(s) ? StringFormat("ON (%s candle close)", StringSubstr(EnumToString(InpConfirmTF), 7)) : "OFF");
    PrintFormat("Trail %s | 4H straddle %s", EnumToString(InpTrailMode),
                InpUse4H ? StringFormat("ON for H4 candles %s-%s", InpH4From, InpH4To) : "off");
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",
@@ -815,7 +844,7 @@ void OnTick()
       if(s == SET_H4 && !H4Allowed()) continue;
       double hi, lo;
       if(!GetLevels(s, hi, lo)) continue;
-      if(InpEntryMode == ENTRY_STOP || InpEntryMode == ENTRY_STOP_LIMIT) PlaceStraddle(s, hi, lo);
+      if(!UsesConfirmation(s)) PlaceStraddle(s, hi, lo);
       else CheckConfirm(s, hi, lo);
      }
   }

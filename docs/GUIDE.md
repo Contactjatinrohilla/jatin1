@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_20_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_21_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -246,3 +246,17 @@ Suggested tests (compare with Code3):
   first (`InpUsePDH=false, InpUseRange=false, InpUse4H=true`). The H4 range is often only a few dollars, so also try
   `InpMinLevelRange_USD` (for example 5) and `InpEntryMode=2` (close confirmation).
 - With 4H on, `InpMaxTradesDay` (2) limits how many 4H trades can happen. Raise it to 3–4 if you want more.
+
+## 10. v7.21: confirmation on/off per setup
+
+`InpEntryMode` sets the entry for every setup: **0 STOP / 1 STOP-LIMIT = confirmation OFF**, **2 CLOSE /
+3 RETEST = confirmation ON**. Each setup can override it:
+
+| Input | Options |
+|---|---|
+| `InpEntryPDH` | 0 Same as Entry mode · 1 OFF: stop · 2 OFF: stop-limit · 3 ON: close · 4 ON: retest |
+| `InpEntryRange` | same |
+| `InpEntryH4` | same |
+
+Example: confirmation only for 4H, none for PDH/RANGE → `InpEntryMode=0`, `InpEntryH4=3`.
+At startup the journal prints each setup's entry and whether confirmation is ON or OFF.
