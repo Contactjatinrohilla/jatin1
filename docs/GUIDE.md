@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_50_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_60_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -265,10 +265,10 @@ At startup the journal prints each setup's entry and whether confirmation is ON 
 
 | File | Use | Passes |
 |---|---|---|
-| `v7_50_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
-| `v7_50_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
-| `v7_50_opt2_multiTP.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
-| `v7_50_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+| `v7_60_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_60_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_60_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_60_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
 
 Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
 **Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
@@ -292,7 +292,7 @@ gold brokers). IST has no summer time, so the same IST window moves by one hour 
 |---|---|---|
 | 12:30–14:30 | 10:00–12:00 server | 09:00–11:00 server |
 
-Preset: `v7_50_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
+Preset: `v7_60_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
 show **IST − 2:30**; in winter **IST − 3:30**. If it doesn't, change `InpServerUTCWinter` / `InpServerDST`.
 Note: 12:30 IST = 07:00 UTC, which is the London open in summer but one hour before it in winter.
 
@@ -324,8 +324,8 @@ SL the lot is 0.02, so 50% = 0.01 works, but 25% = 0.005 rounds to 0 and that pa
 so). Use a bigger balance in the tester, or `InpTP1_Pct = 50` with no TP2. The Custom max statistics count a trade's
 partial closes as one trade.
 
-Presets: `v7_50_multiTP.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
-and `v7_50_opt2_multiTP.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
+Presets: `v7_60_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
+and `v7_60_opt2_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
 
 ## 13. v7.31: don't re-trade a level that was already broken
 
@@ -380,3 +380,24 @@ The stop loss now moves only for:
 Exits are therefore: SL, breakeven, TP1/TP2 partials, the final TP (`InpRR`) and the daily close time.
 Presets: `baseline`, `range_IST_1230_1430`, `opt1_exits`, `opt3_entry`, `multiTP` (TP1 50% @1R → BE, TP2 25% @2R →
 lock TP1, last 25% @3R) and `opt2_multiTP` (TP1 0.5–1.5R × TP1 size 30–60%, 12 passes).
+
+## 16. v7.60: multiple TPs removed, simple fixed trailing stop
+
+**Removed:** the TP1 / TP2 partial closes (section 3b) and their inputs. One trade = one lot, one SL, one TP.
+
+**Breakeven and trailing**, all in $ of gold price, the same unit as `InpSL_USD` ($1 = 100 points on 2-digit gold):
+
+| Input | Example | Meaning |
+|---|---|---|
+| `InpBE_Trigger_USD` | 10.00 | At +$10 profit move the SL to entry… (0 = off) |
+| `InpBE_Lock_USD` | 0.50 | …plus $0.50, so it covers the spread |
+| `InpTrailStart_USD` | 15.00 | From +$15 profit the trailing stop is active (0 = off) |
+| `InpTrailDist_USD` | 6.00 | The SL stays $6 behind price |
+| `InpTrailStep_USD` | 0.50 | The SL is moved only when it gains at least $0.50 |
+
+BUY at 2000.00, SL 1990.00 → at 2010.00 SL = 2000.50 → at 2015.00 SL = 2009.00 → at 2020.00 SL = 2014.00. The SL
+never moves back. Use `InpRR = 0` (no TP) or a TP well above the trail start. Every SL move is logged:
+`Position #12 SL 1990.00 -> 2000.50 (breakeven at +$10.05 profit)`.
+
+Presets: `baseline` (BE at +$10, trailing off), `trail` (no TP, BE +$10, trail $6 from +$15), `opt2_trail` (start
+$10–25 × distance $3–12, 16 passes), plus `opt1_exits`, `opt3_entry`, `range_IST_1230_1430`.
