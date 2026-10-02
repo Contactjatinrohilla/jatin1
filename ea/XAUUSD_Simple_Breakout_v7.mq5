@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.21                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.22                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -40,8 +40,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.21"
-#property version   "7.21"
+#property copyright "XAUUSD Simple Breakout v7.22"
+#property version   "7.22"
 
 #include <Trade\Trade.mqh>
 
@@ -486,7 +486,8 @@ bool GetRange(double &hi, double &lo)
    return true;
   }
 
-void DrawLevel(string name, datetime t1, datetime t2, double price, color clr)
+// Level line from the moment the level is KNOWN (t1) to the end of its trading window (t2).
+void DrawLevel(string name, datetime t1, datetime t2, double price, color clr, string label)
   {
    if(ObjectFind(0, name) >= 0) return;
    ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price);
@@ -494,6 +495,21 @@ void DrawLevel(string name, datetime t1, datetime t2, double price, color clr)
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASH);
    ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   string txt = StringFormat("%s %.*f", label, _Digits, price);
+   ObjectSetString(0, name, OBJPROP_TEXT, txt);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, txt);
+  }
+
+// Shaded box over the window the range was measured in (drawn once the range has ended).
+void DrawBox(string name, datetime t1, datetime t2, double hi, double lo, color clr)
+  {
+   if(ObjectFind(0, name) >= 0) return;
+   ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FILL, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, StringFormat("range window: high %.*f low %.*f", _Digits, hi, _Digits, lo));
   }
 
 // Levels for setup s, checked against the level-size filter (logged and drawn once per day).
@@ -511,13 +527,18 @@ bool GetLevels(int s, double &hi, double &lo)
                   g_levelOk[s] ? "" : " -> SKIPPED by level-size filter");
       if(!MQLInfoInteger(MQL_OPTIMIZATION))
         {
-         datetime t1 = (s == SET_H4) ? g_h4Start : g_day + (s == SET_PDH ? g_tPDH : g_tRangeStart) * 60;
+         // Lines start when the level is known: PDH at PDHStart, RANGE at RangeEnd, H4 at the candle open.
+         datetime t1 = ActiveTime(s);
          datetime t2 = (s == SET_H4) ? g_h4Start + 4 * 3600 : g_day + g_tTradeEnd * 60;
          string   id = TimeToString(s == SET_H4 ? g_h4Start : g_day, TIME_DATE | TIME_MINUTES);
          color    ch = (s == SET_PDH) ? clrDodgerBlue : (s == SET_RANGE) ? clrLime : clrMagenta;
          color    cl = (s == SET_PDH) ? clrOrangeRed : (s == SET_RANGE) ? clrYellow : clrAqua;
-         DrawLevel(g_name[s] + "_H_" + id, t1, t2, hi, ch);
-         DrawLevel(g_name[s] + "_L_" + id, t1, t2, lo, cl);
+         string   nm = (s == SET_PDH) ? "PDH" : (s == SET_RANGE) ? "RANGE high" : "4H high";
+         string   nl = (s == SET_PDH) ? "PDL" : (s == SET_RANGE) ? "RANGE low" : "4H low";
+         DrawLevel(g_name[s] + "_H_" + id, t1, t2, hi, ch, nm);
+         DrawLevel(g_name[s] + "_L_" + id, t1, t2, lo, cl, nl);
+         if(s == SET_RANGE)
+            DrawBox("RANGE_BOX_" + id, g_day + g_tRangeStart * 60, g_day + g_tRangeEnd * 60, hi, lo, C'40,40,70');
         }
      }
    return g_levelOk[s];
@@ -752,6 +773,7 @@ int OnInit()
    g_magic[SET_PDH]   = InpMagic + 1;
    g_magic[SET_RANGE] = InpMagic + 2;
    g_magic[SET_H4]    = InpMagic + 3;
+   ChartSetInteger(0, CHART_SHOW_OBJECT_DESCR, true);   // show the level labels on the chart
    if(InpTrailMode == TRAIL_ATR)
      {
       g_atr = iATR(_Symbol, InpTrailATR_TF, InpTrailATR_Period);
