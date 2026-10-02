@@ -400,4 +400,9 @@ never moves back. Use `InpRR = 0` (no TP) or a TP well above the trail start. Ev
 `Position #12 SL 1990.00 -> 2000.50 (breakeven at +$10.05 profit)`.
 
 Presets: `baseline` (BE at +$10, trailing off), `trail` (no TP, BE +$10, trail $6 from +$15), `opt2_trail` (start
-$10–25 × distance $3–12, 16 passes), plus `opt1_exits`, `opt3_entry`, `range_IST_1230_1430`.
+$5–25 × distance $1–11, 30 passes), plus `opt1_exits`, `opt3_entry`, `range_IST_1230_1430`.
+
+**Optimisation ranges (v7.60 presets):** the Start column of every input begins at its minimum valid value, e.g.
+SL $1–20, TP 0–5R, breakeven 0–$30, lock 0–$2, trail start 0–$40, trail distance $1–20 (minimum allowed), trail step
+0–$2, risk 0.1–2%. Ticked inputs use a coarser step so a run stays small: `opt1_exits` = SL $2–14 × TP 1–3R ×
+breakeven 0/$5/$10 (105 passes), `opt2_trail` = trail start $5–25 × distance $1–11 (30 passes).
