@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.30                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.31                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -42,8 +42,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.30"
-#property version   "7.30"
+#property copyright "XAUUSD Simple Breakout v7.31"
+#property version   "7.31"
 
 #include <Trade\Trade.mqh>
 
@@ -139,6 +139,8 @@ input double InpBuffer_USD      = 0.00;     // Entry this far beyond the level
 input double InpMaxSlip_USD     = 0.50;     // STOP-LIMIT: max fill distance past the level
 input double InpMaxChase_USD    = 3.00;     // CLOSE/RETEST: ignore closes further than this past the level (0 = off)
 input double InpMaxSpread_USD   = 0.60;     // Wait while the spread is wider than this
+input bool   InpSkipBroken      = true;     // STOP modes: skip a side whose level price already traded through
+input double InpBrokenTol_USD   = 0.00;     // ...counts as broken when price came within this of the level
 
 input group "=== 3. Exit (USD price distance: 5.00 = $5 gold move) ==="
 input double InpSL_USD          = 5.00;     // Stop loss distance
@@ -689,6 +691,30 @@ bool SendOrder(int s, ENUM_ORDER_TYPE type, double entry, double limitPx = 0)
    return false;
   }
 
+// Start of the period in which a level counts as "already broken":
+// PDH from the start of the day, RANGE from the range end, H4 from the H4 candle open.
+datetime BrokenSince(int s) { return (s == SET_PDH) ? g_day : ActiveTime(s); }
+
+// True if price has already reached the entry level of this side since BrokenSince(s)
+// (e.g. during the blackout before PDHStart, a no-trade window, or while another trade
+// was open) - a breakout that already happened and came back is not traded again.
+bool LevelBroken(int s, bool isBuy, double level)
+  {
+   if(!InpSkipBroken) return false;
+   datetime from = BrokenSince(s);
+   MqlRates r[];
+   int n = CopyRates(_Symbol, PERIOD_M1, from, TimeCurrent(), r);
+   if(n <= 0) return false;
+   double ext = isBuy ? r[0].high : r[0].low;
+   for(int i = 1; i < n; i++) ext = isBuy ? MathMax(ext, r[i].high) : MathMin(ext, r[i].low);
+   bool broken = isBuy ? (ext >= level - InpBrokenTol_USD) : (ext <= level + InpBrokenTol_USD);
+   if(broken)
+      PrintFormat("[%s] %s skipped: price already traded %s %.*f since %s (%s %.*f) - broken level, not re-entered",
+                  g_name[s], isBuy ? "BUY" : "SELL", isBuy ? "up to" : "down to", _Digits, level,
+                  TimeToString(from, TIME_DATE | TIME_MINUTES), isBuy ? "high" : "low", _Digits, ext);
+   return broken;
+  }
+
 // STOP / STOP-LIMIT modes: the straddle is placed once (re-placed only after a re-arm).
 void PlaceStraddle(int s, double hi, double lo)
   {
@@ -702,11 +728,13 @@ void PlaceStraddle(int s, double hi, double lo)
    double sellAt  = Norm(lo - InpBuffer_USD);
 
    if(!DirOK(true)) { }
+   else if(buyAt - ask > minDist && LevelBroken(s, true, buyAt)) { }
    else if(buyAt - ask > minDist)
       SendOrder(s, useStopLimit ? ORDER_TYPE_BUY_STOP_LIMIT : ORDER_TYPE_BUY_STOP, buyAt, useStopLimit ? Norm(buyAt + InpMaxSlip_USD) : 0);
    else PrintFormat("[%s] BUY skipped: ask %.*f is already at/above %.*f", g_name[s], _Digits, ask, _Digits, buyAt);
 
    if(!DirOK(false)) { }
+   else if(bid - sellAt > minDist && LevelBroken(s, false, sellAt)) { }
    else if(bid - sellAt > minDist)
       SendOrder(s, useStopLimit ? ORDER_TYPE_SELL_STOP_LIMIT : ORDER_TYPE_SELL_STOP, sellAt, useStopLimit ? Norm(sellAt - InpMaxSlip_USD) : 0);
    else PrintFormat("[%s] SELL skipped: bid %.*f is already at/below %.*f", g_name[s], _Digits, bid, _Digits, sellAt);
