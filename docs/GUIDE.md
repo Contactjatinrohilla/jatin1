@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_21_optimise.set` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_21_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -260,3 +260,18 @@ Suggested tests (compare with Code3):
 
 Example: confirmation only for 4H, none for PDH/RANGE → `InpEntryMode=0`, `InpEntryH4=3`.
 At startup the journal prints each setup's entry and whether confirmation is ON or OFF.
+
+## 11. Ready-made settings files (v7.21)
+
+| File | Use | Passes |
+|---|---|---|
+| `v7_21_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_21_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_21_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_21_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+
+Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
+**Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
+algorithm**, criterion = **Custom max**. Only trust settings that are good in both the Back and Forward results.
+`InpScoreMaxDD` is 20 in these files so the current strategy (≈15–18% DD) still gets a score. Lower it to 10 once
+the drawdown improves.
