@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.22                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.23                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -40,8 +40,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.22"
-#property version   "7.22"
+#property copyright "XAUUSD Simple Breakout v7.23"
+#property version   "7.23"
 
 #include <Trade\Trade.mqh>
 
@@ -60,6 +60,20 @@ enum ENUM_ENTRY_OVERRIDE
    EO_STOP_LIMIT = 2, // Confirmation OFF: stop-limit
    EO_CLOSE      = 3, // Confirmation ON: candle close, market order
    EO_RETEST     = 4  // Confirmation ON: candle close, then retest limit
+  };
+
+enum ENUM_RANGE_TZ
+  {
+   RTZ_SERVER = 0, // Server time
+   RTZ_IST    = 1, // India time (IST, UTC+5:30)
+   RTZ_UTC    = 2  // UTC
+  };
+
+enum ENUM_SERVER_DST
+  {
+   SDST_US   = 0, // Summer +1h on US dates (most gold brokers)
+   SDST_EU   = 1, // Summer +1h on EU dates
+   SDST_NONE = 2  // No summer time (fixed offset)
   };
 
 enum ENUM_DIRECTION
@@ -100,6 +114,9 @@ input string InpPDHStart        = "01:15";  // A: active from
 input bool   InpUseRange        = true;     // Setup B: session-range breakout
 input string InpRangeStart      = "10:00";  // B: range start (10:00 server = London 08:00)
 input string InpRangeEnd        = "18:00";  // B: range end = active from (18:00 server = London 16:00)
+input ENUM_RANGE_TZ InpRangeTZ  = RTZ_SERVER; // B: range start/end are typed in this time zone
+input int    InpServerUTCWinter = 2;        // Broker server UTC offset in winter (hours)
+input ENUM_SERVER_DST InpServerDST = SDST_US; // Broker server summer-time rule
 input bool   InpUse4H           = false;    // Setup C: 4H candle high/low straddle
 input string InpH4From          = "08:00";  // C: only H4 candles opening at/after this time
 input string InpH4To            = "20:00";  // C: ...and before this time (H4 opens 00,04,08,12,16,20)
@@ -168,6 +185,8 @@ ulong    g_magic[NSETS];
 string   g_name[NSETS] = {"PDH", "RANGE", "H4"};
 int      g_tPDH, g_tRangeStart, g_tRangeEnd, g_tTradeEnd, g_tClose;   // minutes after server midnight
 int      g_tH4From, g_tH4To;
+int      g_rangeStartIn, g_rangeEndIn;   // range times as typed (in InpRangeTZ)
+bool     g_rangeDayOk  = true;           // converted range window is usable today
 datetime g_h4Start     = 0;    // open time of the current H4 candle
 int      g_atr         = INVALID_HANDLE;
 int      g_w1s = -1, g_w1e = -1, g_w2s = -1, g_w2e = -1;              // no-trade windows
@@ -378,6 +397,51 @@ void RecoverUsed()
      }
   }
 
+int DayOfWeekOf(int y, int m, int d)
+  {
+   MqlDateTime t; ZeroMemory(t); t.year = y; t.mon = m; t.day = d;
+   MqlDateTime o; TimeToStruct(StructToTime(t), o);
+   return o.day_of_week;
+  }
+int NthSunday(int y, int m, int n) { return 1 + (7 - DayOfWeekOf(y, m, 1)) % 7 + 7 * (n - 1); }
+int LastSunday(int y, int m)
+  {
+   int dim = (m == 3 || m == 10) ? 31 : 30;
+   return dim - DayOfWeekOf(y, m, dim);
+  }
+
+// Broker server UTC offset (minutes) on the given server day.
+int ServerOffsetMin(datetime day)
+  {
+   MqlDateTime t; TimeToStruct(day, t);
+   int md = t.mon * 100 + t.day;
+   bool dst = false;
+   if(InpServerDST == SDST_US) dst = md >= 300 + NthSunday(t.year, 3, 2) && md < 1100 + NthSunday(t.year, 11, 1);
+   if(InpServerDST == SDST_EU) dst = md >= 300 + LastSunday(t.year, 3) && md < 1000 + LastSunday(t.year, 10);
+   return (InpServerUTCWinter + (dst ? 1 : 0)) * 60;
+  }
+
+// Converts the typed range times to server minutes for this day (IST has no summer time,
+// so the server window moves by an hour when the broker changes clocks).
+void ApplyRangeTZ(datetime day)
+  {
+   int prevS = g_tRangeStart, prevE = g_tRangeEnd;
+   if(InpRangeTZ == RTZ_SERVER) { g_tRangeStart = g_rangeStartIn; g_tRangeEnd = g_rangeEndIn; }
+   else
+     {
+      int zone = (InpRangeTZ == RTZ_IST) ? 330 : 0;
+      int srv  = ServerOffsetMin(day);
+      g_tRangeStart = ((g_rangeStartIn - zone + srv) % 1440 + 1440) % 1440;
+      g_tRangeEnd   = ((g_rangeEndIn   - zone + srv) % 1440 + 1440) % 1440;
+     }
+   g_rangeDayOk = (g_tRangeStart < g_tRangeEnd && g_tRangeEnd < g_tTradeEnd);
+   if(InpUseRange && (prevS != g_tRangeStart || prevE != g_tRangeEnd))
+      PrintFormat("[RANGE] window %s-%s %s = %02d:%02d-%02d:%02d server%s", InpRangeStart, InpRangeEnd,
+                  InpRangeTZ == RTZ_IST ? "IST" : InpRangeTZ == RTZ_UTC ? "UTC" : "server",
+                  g_tRangeStart / 60, g_tRangeStart % 60, g_tRangeEnd / 60, g_tRangeEnd % 60,
+                  g_rangeDayOk ? "" : " -> NOT USABLE (must end before TradeEnd and not cross midnight)");
+  }
+
 // Last minute of today's trade session from the symbol specification (1440 if unknown).
 int SessionEndMin(int dow)
   {
@@ -391,6 +455,7 @@ int SessionEndMin(int dow)
 void NewDay(datetime day)
   {
    g_day     = day;
+   ApplyRangeTZ(day);
    g_halted  = false;
    g_rangeHi = 0;
    g_rangeLo = 0;
@@ -736,8 +801,10 @@ int Fail(string why)
 int OnInit()
   {
    g_tPDH        = ParseHHMM(InpPDHStart);
-   g_tRangeStart = ParseHHMM(InpRangeStart);
-   g_tRangeEnd   = ParseHHMM(InpRangeEnd);
+   g_rangeStartIn = ParseHHMM(InpRangeStart);
+   g_rangeEndIn   = ParseHHMM(InpRangeEnd);
+   g_tRangeStart  = g_rangeStartIn;
+   g_tRangeEnd    = g_rangeEndIn;
    g_tTradeEnd   = ParseHHMM(InpTradeEnd);
    g_tClose      = ParseHHMM(InpCloseTime);
    g_tH4From     = ParseHHMM(InpH4From);
@@ -755,8 +822,11 @@ int OnInit()
    if(InpTrailMode == TRAIL_ATR && (InpTrailATR_Period < 1 || InpTrailATR_Mult <= 0))
       return Fail("ATR trail needs Period >= 1 and Mult > 0");
    if(InpUsePDH && g_tPDH >= g_tTradeEnd)         return Fail("PDHStart must be before TradeEnd");
-   if(InpUseRange && !(g_tRangeStart < g_tRangeEnd && g_tRangeEnd < g_tTradeEnd))
-      return Fail("need RangeStart < RangeEnd < TradeEnd");
+   if(InpUseRange && g_rangeStartIn >= 0 && g_rangeEndIn >= 0 && g_rangeStartIn >= g_rangeEndIn)
+      return Fail("RangeStart must be before RangeEnd");
+   if(InpUseRange && InpRangeTZ == RTZ_SERVER && g_tRangeEnd >= g_tTradeEnd)
+      return Fail("RangeEnd must be before TradeEnd");
+   if(InpServerUTCWinter < -12 || InpServerUTCWinter > 14) return Fail("ServerUTCWinter must be -12..14");
    if(g_tClose >= 0 && g_tClose < g_tTradeEnd)    return Fail("CloseTime must be at or after TradeEnd");
    if(InpSL_USD <= 0 || InpRR < 0 || InpBE_R < 0 || InpBuffer_USD < 0 || InpMaxSpread_USD <= 0 ||
       InpMaxSlip_USD < 0 || InpMaxChase_USD < 0 || InpMinLevelRange_USD < 0 || InpMaxLevelRange_USD < 0)
@@ -864,6 +934,7 @@ void OnTick()
      {
       if(!SetEnabled(s) || g_used[s] || g_filled[s] || now < ActiveTime(s)) continue;
       if(s == SET_H4 && !H4Allowed()) continue;
+      if(s == SET_RANGE && !g_rangeDayOk) continue;
       double hi, lo;
       if(!GetLevels(s, hi, lo)) continue;
       if(!UsesConfirmation(s)) PlaceStraddle(s, hi, lo);
