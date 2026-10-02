@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_41_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_50_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -265,10 +265,10 @@ At startup the journal prints each setup's entry and whether confirmation is ON 
 
 | File | Use | Passes |
 |---|---|---|
-| `v7_41_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
-| `v7_41_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
-| `v7_41_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
-| `v7_41_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+| `v7_50_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_50_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_50_opt2_multiTP.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_50_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
 
 Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
 **Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
@@ -292,7 +292,7 @@ gold brokers). IST has no summer time, so the same IST window moves by one hour 
 |---|---|---|
 | 12:30–14:30 | 10:00–12:00 server | 09:00–11:00 server |
 
-Preset: `v7_41_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
+Preset: `v7_50_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
 show **IST − 2:30**; in winter **IST − 3:30**. If it doesn't, change `InpServerUTCWinter` / `InpServerDST`.
 Note: 12:30 IST = 07:00 UTC, which is the London open in summer but one hour before it in winter.
 
@@ -324,8 +324,8 @@ SL the lot is 0.02, so 50% = 0.01 works, but 25% = 0.005 rounds to 0 and that pa
 so). Use a bigger balance in the tester, or `InpTP1_Pct = 50` with no TP2. The Custom max statistics count a trade's
 partial closes as one trade.
 
-Presets: `v7_41_multiTP_early_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
-and `v7_41_opt4_tp_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
+Presets: `v7_50_multiTP.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
+and `v7_50_opt2_multiTP.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
 
 ## 13. v7.31: don't re-trade a level that was already broken
 
@@ -367,3 +367,16 @@ it out within seconds. Set `InpRR = 0` (or ≥ 3) so the trail has room before a
 
 Presets (v7.40): `opt2_trail` optimises trail start $10–25 × distance $3–12 (16 passes); `opt4_tp_trail` optimises
 TP1 level × trail distance $4–10 (12 passes); `multiTP_early_trail` is TP1/TP2 plus a $6 trail from +$15.
+
+## 15. v7.50: trailing stop removed
+
+The trailing stop is gone completely, including the inputs `InpTrailStart_USD`, `InpTrailDist_USD` and
+`InpTrailStep_USD`. Sections 9, 12 (trailing part) and 14 (trailing part) no longer apply.
+The stop loss now moves only for:
+- **Breakeven**: at `+InpBE_Trigger_USD` profit, SL → entry + `InpBE_Lock_USD`
+- **TP1**: SL → entry + `InpBE_Lock_USD` if `InpTP1_MoveBE`
+- **TP2**: SL → TP1 price if `InpTP2_LockTP1`
+
+Exits are therefore: SL, breakeven, TP1/TP2 partials, the final TP (`InpRR`) and the daily close time.
+Presets: `baseline`, `range_IST_1230_1430`, `opt1_exits`, `opt3_entry`, `multiTP` (TP1 50% @1R → BE, TP2 25% @2R →
+lock TP1, last 25% @3R) and `opt2_multiTP` (TP1 0.5–1.5R × TP1 size 30–60%, 12 passes).

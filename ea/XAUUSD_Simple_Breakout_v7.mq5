@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|              XAUUSD_Simple_Breakout.mq5   v7.41                   |
+//|              XAUUSD_Simple_Breakout.mq5   v7.50                   |
 //|                                                                  |
 //|  A deliberately small rewrite of the PDH/PDL + London idea.       |
 //|                                                                  |
@@ -29,11 +29,10 @@
 //|     filter, direction switch.                                    |
 //|   - Orders deleted at TradeEnd, trades closed at CloseTime.       |
 //|   - Daily loss stop on closed + open P/L.                         |
-//|   - Fixed-distance breakeven and trailing stop (all in $):        |
-//|     at +BE_Trigger SL -> entry (+BE_Lock); from +TrailStart the   |
-//|     SL follows TrailDist behind price.                            |
+//|   - Fixed breakeven (in $): at +BE_Trigger SL -> entry + BE_Lock. |
+//|     No trailing stop.                                             |
 //|   - Optional multiple take profits: TP1 / TP2 partial closes      |
-//|     (then breakeven / lock at TP1), the rest runs to TP or trail. |
+//|     (then breakeven / lock at TP1), the rest runs to TP / close. |
 //|                                                                  |
 //|  OPTIMISATION: select "Custom max" in the Strategy Tester and     |
 //|  pick what to maximise with InpScore (section 7).                 |
@@ -43,8 +42,8 @@
 //|  TIMES: SERVER time. On a UTC+2/+3 server London 08:00 = 10:00 and |
 //|  US data (08:30 New York) = 15:30. See docs/GUIDE.md.              |
 //+------------------------------------------------------------------+
-#property copyright "XAUUSD Simple Breakout v7.41"
-#property version   "7.41"
+#property copyright "XAUUSD Simple Breakout v7.50"
+#property version   "7.50"
 
 #include <Trade\Trade.mqh>
 
@@ -139,9 +138,6 @@ input double InpSL_USD          = 5.00;     // Stop loss distance
 input double InpRR              = 2.0;      // Take profit = SL x this (0 = no TP)
 input double InpBE_Trigger_USD  = 5.00;     // Breakeven: move SL to entry when the trade is this much in profit (0 = off)
 input double InpBE_Lock_USD     = 0.50;     // Breakeven: put the SL this much past entry (covers spread)
-input double InpTrailStart_USD  = 7.50;     // Trailing stop: active once the trade is this much in profit (0 = off)
-input double InpTrailDist_USD   = 4.00;     // Trailing stop: SL follows this far behind price
-input double InpTrailStep_USD   = 0.50;     // Trail: move SL only in steps of at least this
 
 input group "=== 3b. Multiple take profits (partial closes) ==="
 input double InpTP1_R           = 0.0;      // TP1 at this many R (0 = off)
@@ -824,19 +820,12 @@ bool ManagePartials(ulong t, bool buy, double open, double profit, double vol)
    return true;
   }
 
-// Trailing stop level for one position (0 = not active yet): a fixed distance behind price.
-double TrailTarget(bool buy, double bid, double ask, double profit)
-  {
-   if(InpTrailStart_USD <= 0 || profit < InpTrailStart_USD) return 0;
-   return Norm(buy ? bid - InpTrailDist_USD : ask + InpTrailDist_USD);
-  }
-
-// Partial take profits, breakeven, TP1/TP2 locks and the trailing stop. The SL only ever
-// moves in the trade's favour (trail in steps of at least InpTrailStep_USD) and respects
+// Partial take profits, breakeven and the TP1/TP2 locks. The SL only ever
+// moves in the trade's favour and respects
 // the broker stop level.
 void ManageStops()
   {
-   if(InpBE_Trigger_USD <= 0 && InpTrailStart_USD <= 0 && InpTP1_R <= 0) return;
+   if(InpBE_Trigger_USD <= 0 && InpTP1_R <= 0) return;
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -868,8 +857,6 @@ void ManageStops()
          double lk = Norm(buy ? open + InpTP1_R * InpSL_USD : open - InpTP1_R * InpSL_USD);
          if(target == 0 || (buy ? lk > target : lk < target)) { target = lk; why = "TP2 -> lock at TP1"; }
         }
-      double tr = TrailTarget(buy, bid, ask, profit);
-      if(tr > 0 && (target == 0 || (buy ? tr > target : tr < target))) { target = tr; why = "trail"; }
       if(target == 0) continue;
       // Broker stop / freeze level: the SL must stay this far from price. Move it to the closest
       // allowed level instead of skipping the update.
@@ -878,8 +865,7 @@ void ManageStops()
       if(buy ? (bid - target < guard) : (target - ask < guard))
          target = Norm(buy ? bid - guard : ask + guard);
       double gain = (sl <= 0) ? DBL_MAX : (buy ? target - sl : sl - target);
-      double step = (why == "trail") ? MathMax(InpTrailStep_USD, _Point) : _Point / 2;
-      if(gain < step) continue;                                                          // not an improvement
+      if(gain < _Point / 2) continue;                                                          // not an improvement
       g_trade.SetExpertMagicNumber(mg);
       if(g_trade.PositionModify(t, target, tp))
          PrintFormat("Position #%I64u SL %.*f -> %.*f (%s, +$%.2f in profit)", t, _Digits, sl, _Digits, target, why, profit);
@@ -917,12 +903,10 @@ int OnInit()
       return Fail("no-trade windows must be HH:MM-HH:MM (or empty)");
    if(!InpUsePDH && !InpUseRange && !InpUse4H)    return Fail("all setups are off");
    if(InpUse4H && g_tH4From >= g_tH4To)           return Fail("H4From must be before H4To");
-   if(InpBE_Trigger_USD < 0 || InpBE_Lock_USD < 0 || InpTrailStart_USD < 0 || InpTrailStep_USD < 0)
-      return Fail("breakeven / trailing values must be >= 0");
+   if(InpBE_Trigger_USD < 0 || InpBE_Lock_USD < 0)
+      return Fail("breakeven values must be >= 0");
    if(InpBE_Trigger_USD > 0 && InpBE_Lock_USD >= InpBE_Trigger_USD)
       return Fail("BE_Lock must be smaller than BE_Trigger");
-   if(InpTrailStart_USD > 0 && InpTrailDist_USD < 1.0)
-      return Fail("TrailDist must be at least $1.00 - tighter trails get stopped by normal gold noise");
    if(InpTP1_R < 0 || InpTP2_R < 0) return Fail("TP1_R / TP2_R must be >= 0");
    if(InpTP1_R > 0 && (InpTP1_Pct <= 0 || InpTP1_Pct >= 100)) return Fail("TP1_Pct must be 1-99");
    if(InpTP2_R > 0 && (InpTP1_R <= 0 || InpTP2_R <= InpTP1_R || InpTP2_Pct <= 0 || InpTP1_Pct + InpTP2_Pct >= 100))
@@ -948,9 +932,6 @@ int OnInit()
    double tpDist = InpSL_USD * InpRR;
    if(InpRR > 0 && InpBE_Trigger_USD >= tpDist)
       PrintFormat("WARNING: breakeven at +$%.2f is at/after the TP at +$%.2f - it will never trigger", InpBE_Trigger_USD, tpDist);
-   if(InpRR > 0 && InpTrailStart_USD >= tpDist)
-      PrintFormat("WARNING: trailing starts at +$%.2f, at/after the TP at +$%.2f - it will never act (use RR 0 or a bigger RR)",
-                  InpTrailStart_USD, tpDist);
 
    g_magic[SET_PDH]   = InpMagic + 1;
    g_magic[SET_RANGE] = InpMagic + 2;
@@ -980,10 +961,8 @@ int OnInit()
    if(InpTP1_R > 0)
       PrintFormat("Take profits: TP1 %.0f%% at %.1fR%s%s | rest -> %s", InpTP1_Pct, InpTP1_R, InpTP1_MoveBE ? " (then SL to entry)" : "",
                   InpTP2_R > 0 ? StringFormat(" | TP2 %.0f%% at %.1fR%s", InpTP2_Pct, InpTP2_R, InpTP2_LockTP1 ? " (then SL to TP1)" : "") : "",
-                  InpRR > 0 ? StringFormat("final TP %.1fR", InpRR) : "trail / close time");
-   PrintFormat("Trailing %s | 4H straddle %s",
-               InpTrailStart_USD > 0 ? StringFormat("from +$%.2f (%.0f pts), $%.2f (%.0f pts) behind price", InpTrailStart_USD,
-                                                    InpTrailStart_USD / _Point, InpTrailDist_USD, InpTrailDist_USD / _Point) : "off",
+                  InpRR > 0 ? StringFormat("final TP %.1fR", InpRR) : "close time");
+   PrintFormat("4H straddle %s",
                InpUse4H ? StringFormat("ON for H4 candles %s-%s", InpH4From, InpH4To) : "off");
    PrintFormat("Server times: PDH from %s | range %s-%s | entries until %s | close %s | no-trade %s %s",
                InpPDHStart, InpRangeStart, InpRangeEnd, InpTradeEnd, (g_tClose < 0 || InpCloseMode == CLOSE_NEVER) ? "never" :
