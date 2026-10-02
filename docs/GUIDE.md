@@ -197,7 +197,7 @@ Every target is set to **0** when the run has fewer than `InpMinTrades` trades, 
 only look good because of news spikes. The journal prints one `SCORE …` line per pass, giving the reason for any 0.
 
 ### Testing the custom entries step by step
-1. Load `ea/presets/v7_31_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
+1. Load `ea/presets/v7_40_opt1_exits.set (and opt2_trail / opt3_entry)` (Strategy Tester → Inputs → right-click → Load). It optimises
    `InpEntryMode` 0–3, `InpCloseMode` 0–1, `InpSL_USD` 3–12, `InpRR` 1.5–3 and `InpBE_R` 0–1.5 (1,280 combinations).
 2. Settings: 100% real ticks (or the Dukascopy custom symbol), 2023–2024, **Custom max**, `InpScore = 0`.
 3. In the Optimisation Results tab, sort by result and look for an entry mode whose **neighbouring** SL/RR values
@@ -265,10 +265,10 @@ At startup the journal prints each setup's entry and whether confirmation is ON 
 
 | File | Use | Passes |
 |---|---|---|
-| `v7_31_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
-| `v7_31_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
-| `v7_31_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
-| `v7_31_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
+| `v7_40_baseline.set` | Single test: Code3 settings + breakeven fixed at 1R + 0.5% risk | 1 |
+| `v7_40_opt1_exits.set` | Optimise SL 6–14 × TP 1.5–3R × breakeven 0/1 | 40 |
+| `v7_40_opt2_trail.set` | No TP; optimise trail mode R/ATR × start 0.5–1.5R × distance 0.5–1.5R | 18 |
+| `v7_40_opt3_entry.set` | Optimise entry mode 0–3 × close mode daily/Friday | 8 |
 
 Tester settings for the optimisations: XAUUSD.m, **Every tick based on real ticks**, 2023.04.01–2026.08.30,
 **Forward = 1/3** (MT5 then tests the last third as unseen data automatically), Optimisation = **Slow complete
@@ -292,7 +292,7 @@ gold brokers). IST has no summer time, so the same IST window moves by one hour 
 |---|---|---|
 | 12:30–14:30 | 10:00–12:00 server | 09:00–11:00 server |
 
-Preset: `v7_31_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
+Preset: `v7_40_range_IST_1230_1430.set`. Check your broker first: during summer, the Market Watch clock should
 show **IST − 2:30**; in winter **IST − 3:30**. If it doesn't, change `InpServerUTCWinter` / `InpServerDST`.
 Note: 12:30 IST = 07:00 UTC, which is the London open in summer but one hour before it in winter.
 
@@ -324,8 +324,8 @@ SL the lot is 0.02, so 50% = 0.01 works, but 25% = 0.005 rounds to 0 and that pa
 so). Use a bigger balance in the tester, or `InpTP1_Pct = 50` with no TP2. The Custom max statistics count a trade's
 partial closes as one trade.
 
-Presets: `v7_31_multiTP_early_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
-and `v7_31_opt4_tp_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
+Presets: `v7_40_multiTP_early_trail.set` (TP1 50% @1R → BE, TP2 25% @2R → lock TP1, rest LOCK 50% trail, max $10)
+and `v7_40_opt4_tp_trail.set` (TP1 0.5–1.5R × trail LOCK/CANDLE × lock 40–70%, 24 passes).
 
 ## 13. v7.31: don't re-trade a level that was already broken
 
@@ -346,3 +346,24 @@ The journal shows `SELL skipped: price already traded down to … since … - br
 `InpBrokenTol_USD` also counts a near miss (e.g. 0.30 = within 30 cents) as broken. It applies to STOP / STOP-LIMIT
 entries. CLOSE / RETEST already need a fresh candle close beyond the level. Set `InpSkipBroken = false` to reproduce
 earlier test results exactly.
+
+## 14. v7.40: simple fixed breakeven and trailing stop (replaces the trailing modes)
+
+The R / ATR / LOCK / CANDLE trailing modes in sections 9 and 12 are **removed**. There are now three fixed
+distances, all in $ of gold price, like the SL ($1 = 100 points on a 2-digit symbol; the journal prints both):
+
+| Input | Example (SL $10) | Meaning |
+|---|---|---|
+| `InpBE_Trigger_USD` | 10.00 | At +$10 profit move the SL to entry (0 = off) |
+| `InpBE_Lock_USD` | 0.50 | ...and put it $0.50 past entry, so breakeven covers the spread |
+| `InpTrailStart_USD` | 15.00 | From +$15 profit the trailing stop is active (0 = off) |
+| `InpTrailDist_USD` | 6.00 | The SL follows $6 behind price, never moving back |
+| `InpTrailStep_USD` | 0.50 | The SL is moved in steps of at least $0.50 |
+
+Example BUY at 2000.00, SL 1990.00: at 2010.00 the SL goes to 2000.50. From 2015.00 it trails at price − $6
+(2009.00, then 2010.00 at 2016.00, and so on). A trail distance under $1 is refused, because gold noise would stop
+it out within seconds. Set `InpRR = 0` (or ≥ 3) so the trail has room before a fixed TP. The multiple-TP inputs
+(section 12) are unchanged.
+
+Presets (v7.40): `opt2_trail` optimises trail start $10–25 × distance $3–12 (16 passes); `opt4_tp_trail` optimises
+TP1 level × trail distance $4–10 (12 passes); `multiTP_early_trail` is TP1/TP2 plus a $6 trail from +$15.
