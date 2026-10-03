@@ -17,7 +17,7 @@
 //|  the symbol you backtest (e.g. XAUUSD.T).                         |
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Simple Breakout - data check"
-#property version   "1.00"
+#property version   "1.10"
 #property script_show_inputs
 
 input datetime InpFrom        = D'2022.04.01';  // From (server date)
@@ -38,6 +38,31 @@ double Median(double &a[])
 void OnStart()
   {
    string sym   = _Symbol;
+
+   // MT5 keeps only "Max bars in chart" bars per symbol/timeframe for scripts and charts
+   // (default 100,000 = about 72 trading days of M1). Make sure the requested range is there.
+   long     maxBars = TerminalInfoInteger(TERMINAL_MAXBARS);
+   datetime first   = 0;
+   for(int tries = 0; tries < 30; tries++)
+     {
+      MqlRates probe[];
+      CopyRates(sym, PERIOD_M1, InpFrom, InpFrom + 7 * 86400, probe);       // asks the server for old history
+      first = (datetime)SeriesInfoInteger(sym, PERIOD_M1, SERIES_FIRSTDATE);
+      if(first > 0 && first <= InpFrom + 7 * 86400) break;
+      Sleep(1000);
+     }
+   datetime serverFirst = (datetime)SeriesInfoInteger(sym, PERIOD_M1, SERIES_SERVER_FIRSTDATE);
+   PrintFormat("M1 history for %s: available from %s (server has it from %s) | Max bars in chart = %I64d",
+               sym, TimeToString(first, TIME_DATE), TimeToString(serverFirst, TIME_DATE), maxBars);
+   if(first > InpFrom + 7 * 86400)
+     {
+      string w = StringFormat("Only M1 data from %s is available here (Max bars in chart = %I64d). "
+                              "Set Tools > Options > Charts > Max bars in chart = Unlimited, restart MT5, "
+                              "open an M1 chart of %s, press Home a few times to load old history, then run this again.",
+                              TimeToString(first, TIME_DATE), maxBars, sym);
+      Print(w);
+      Alert(w);
+     }
    double pt    = SymbolInfoDouble(sym, SYMBOL_POINT);
    int    dg    = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    string fname = "SB_datacheck_" + sym + ".csv";
@@ -141,14 +166,15 @@ void OnStart()
 
    int fh1 = 0, lh1 = 0;
    for(int h = 0; h < 24; h++) { if(firstHour[h] > firstHour[fh1]) fh1 = h; if(lastHour[h] > lastHour[lh1]) lh1 = h; }
-   string s = StringFormat("DATA CHECK %s %s-%s: %d days with data (%I64d M1 bars) | weekdays without data: %d | weekend days with bars: %d | "
-                           "D1 vs M1 mismatch: %d days | days with gaps > %d min: %d | spike days: %d | zero-spread days: %d | "
-                           "wide-spread days: %d | avg spread %.1f pts | trading day usually %02d:xx - %02d:xx server",
-                           sym, TimeToString(InpFrom, TIME_DATE), TimeToString(InpTo, TIME_DATE), days, totalBars, noData,
-                           weekendDays, d1Bad, InpMaxGapMin, gapDays, spikeDays, zeroSpreadDays, wideDays,
-                           days > 0 ? sprSum / days : 0, fh1, lh1);
-   Print(s);
+   string head = StringFormat("DATA CHECK %s  %s - %s", sym, TimeToString(InpFrom, TIME_DATE), TimeToString(InpTo, TIME_DATE));
+   string l1 = StringFormat("Days with data: %d  (%I64d M1 bars) | weekdays without data: %d", days, totalBars, noData);
+   string l2 = StringFormat("Weekend days with bars: %d | D1 vs M1 high/low mismatch: %d days", weekendDays, d1Bad);
+   string l3 = StringFormat("Days with gaps > %d min: %d | spike days: %d", InpMaxGapMin, gapDays, spikeDays);
+   string l4 = StringFormat("Zero-spread days: %d | wide-spread days: %d | average spread %.1f points",
+                            zeroSpreadDays, wideDays, days > 0 ? sprSum / days : 0);
+   string l5 = StringFormat("Trading day usually starts %02d:xx and ends %02d:xx (server time)", fh1, lh1);
+   Print(head); Print(l1); Print(l2); Print(l3); Print(l4); Print(l5);
    PrintFormat("Details per day: %s\\Files\\%s", TerminalInfoString(TERMINAL_COMMONDATA_PATH), fname);
-   Alert(s);
+   Alert(head); Alert(l1); Alert(l2); Alert(l3); Alert(l4); Alert(l5);
   }
 //+------------------------------------------------------------------+
