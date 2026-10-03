@@ -68,6 +68,67 @@ def fmt_hold(sec):
     return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
 
 
+def diagnosis_notes(trades):
+    """Plain-language findings computed from this report's trades."""
+    import statistics as st
+    from collections import defaultdict
+    rows = []
+    for t in trades:
+        e, x, o = t["entry"], t["exit"], t["order"]
+        buy = e["type"] == "buy"
+        p = x["profit"] + x["swap"] + x["comm"] + e["comm"]
+        sld = abs(o["price"] - o["sl"]) if o.get("sl") else 0
+        risk = sld * e["vol"] * 100 if sld else 0
+        c = x["comment"]
+        if c.startswith("tp"):
+            why = "tp"
+        elif c.startswith("sl "):
+            why = "sl" if o.get("sl") and abs(float(c[3:]) - o["sl"]) < 0.02 else "be"
+        else:
+            why = "ea"
+        rows.append(dict(p=p, R=p / risk if risk else 0, why=why, sld=sld, setup=e["comment"] or "?",
+                         hour=e["time"].hour, hold=(x["time"] - e["time"]).total_seconds(),
+                         slip=(e["price"] - o["price"]) if buy else (o["price"] - e["price"])))
+    if not rows:
+        return ["No trades."]
+    n = len(rows)
+    net = sum(r["p"] for r in rows)
+    gp = sum(r["p"] for r in rows if r["p"] > 0)
+    gl = -sum(r["p"] for r in rows if r["p"] < 0) or 1
+    sl = st.median(r["sld"] for r in rows)
+    k = {w: [r for r in rows if r["why"] == w] for w in ("tp", "sl", "be", "ea")}
+    f = lambda g: f"{len(g)} ({100 * len(g) / n:.0f}%), net ${sum(r['p'] for r in g):,.0f}"
+    notes = [f"1. Result: {n} trades, net ${net:,.0f}, profit factor {gp / gl:.2f}, typical stop ${sl:.2f}, "
+             f"median hold {st.median(r['hold'] for r in rows) / 60:.0f} min."]
+    notes.append(f"2. Exits: take profit {f(k['tp'])} | full stop loss {f(k['sl'])} | breakeven/trailing stop {f(k['be'])} | "
+                 f"close time / EA {f(k['ea'])}.")
+    if k["be"] and len(k["be"]) > 0.3 * n:
+        notes.append(f"3. Breakeven is hit very often ({100 * len(k['be']) / n:.0f}% of trades, average "
+                     f"{st.mean(r['R'] for r in k['be']):+.2f}R). That raises the win rate but those 'wins' are worth almost "
+                     f"nothing, and they stop trades that would have gone on to the TP. Move breakeven later (e.g. 1R).")
+    else:
+        notes.append(f"3. Win rate {100 * sum(r['p'] > 0 for r in rows) / n:.0f}%, average win "
+                     f"${st.mean([r['p'] for r in rows if r['p'] > 0] or [0]):.2f} vs average loss "
+                     f"${st.mean([r['p'] for r in rows if r['p'] < 0] or [0]):.2f}.")
+    if k["sl"]:
+        notes.append(f"4. Full losses average {st.mean(r['R'] for r in k['sl']):.2f}R (worst {min(r['R'] for r in k['sl']):.2f}R); "
+                     f"entry slippage averages ${st.mean(r['slip'] for r in rows):.2f} = "
+                     f"{100 * st.mean(r['slip'] for r in rows) / sl if sl else 0:.0f}% of the stop.")
+    by = defaultdict(float)
+    for r in rows:
+        by[r["setup"]] += r["p"]
+    best = max(by, key=by.get)
+    worst = min(by, key=by.get)
+    notes.append(f"5. Best setup {best} (${by[best]:,.0f}), worst {worst} (${by[worst]:,.0f}) - see Breakdown > By setup.")
+    hh = defaultdict(float)
+    for r in rows:
+        hh[r["hour"]] += r["p"]
+    wh = sorted(hh, key=hh.get)[:3]
+    notes.append("6. Worst entry hours (server): " + ", ".join(f"{h:02d}:00 (${hh[h]:,.0f})" for h in wh) +
+                 " - candidates for a no-trade window.")
+    return notes
+
+
 def build(src, dst):
     info, inputs, results, trades = parse(src)
     deposit = float(info.get("Initial Deposit") or info.get("Deposit deal") or 0)
@@ -93,7 +154,9 @@ def build(src, dst):
         profit = round(x["profit"] + x["swap"] + x["comm"] + e["comm"], 2)
         stop_hit = float(x["comment"][3:]) if x["comment"].startswith("sl ") else None
         plan_px, init_sl = o.get("price"), o.get("sl")
-        if stop_hit is None:
+        if x["comment"].startswith("tp"):
+            reason = "Take profit"
+        elif stop_hit is None:
             reason = "Closed by EA (no SL)"
         elif init_sl and abs(stop_hit - init_sl) < 0.02:
             reason = "Initial stop loss"
@@ -110,7 +173,9 @@ def build(src, dst):
         story = (f"{side} STOP at {plan_px:.2f} filled at {e['price']:.3f} "
                  f"(${abs(slip):.2f} {'worse' if slip > 0 else 'better'}). "
                  f"SL ${sld:.2f} away = ${risk:.0f} risk. ")
-        if reason == "Initial stop loss":
+        if reason == "Take profit":
+            story += f"Reached the take profit at {x['price']:.3f}"
+        elif reason == "Initial stop loss":
             story += f"Price went against it; stopped at {x['price']:.3f}"
         elif reason.startswith("Trailing"):
             story += f"Moved into profit, trailing/breakeven stop closed it at {x['price']:.3f}"
@@ -220,6 +285,7 @@ def build(src, dst):
          "In seconds-long trades the result is mostly spread, slippage and tick noise."),
         ("Trades closed within 60 seconds", f'=COUNTIF({T("P")},"<60")', "0", ""),
         ("EXITS", None, None, None),
+        ("Exits: take profit", f'=COUNTIF({T("T")},"Take profit")', "0", "Full wins at the TP."),
         ("Exits: initial stop loss", f'=COUNTIF({T("T")},"Initial stop loss")', "0", "Full losses."),
         ("Net $ from initial-SL exits", f'=SUMIF({T("T")},"Initial stop loss",{T("W")})', USD, ""),
         ("Exits: trailing/breakeven stop", f'=COUNTIF({T("T")},"Breakeven/trailing stop")', "0", "Stop had been moved to the order price or beyond. Can still lose a little because of entry/exit slippage."),
@@ -255,24 +321,11 @@ def build(src, dst):
         for cc in range(2, 6):
             ws.cell(row=r, column=cc).border = THIN
         r += 1
-    assert r - 1 == 44, r   # verdict row numbers above rely on this layout
+    assert r - 1 == 45, r   # verdict row numbers above rely on this layout
 
     r += 1
     ws.cell(row=r, column=2, value="DIAGNOSIS (analyst notes for this report)").font = TITLE
-    notes = [
-        "1. The stop loss is too small for gold. Every trade used a $1.50 stop, and gold often moves that much "
-        "within a few seconds. The median trade lasted only seconds, so results are mostly noise.",
-        "2. Slippage eats the stop. Stop orders fill on a moving price, about $0.58 worse on average, "
-        "which uses up about 40% of the $1.50 stop before the trade starts.",
-        "3. Losses are bigger than planned. Trades that hit the initial stop lost about 1.5x the planned 1% "
-        "(see Breakdown > Exit reason), because the exit slips too. Winners are cut short by the 10-point trail.",
-        "4. Result: average win and average loss are about the same size, but only ~41% of trades win, so the "
-        "account drifts down steadily (profit factor about 0.5).",
-        "5. Time of day matters. Entries in the Asian session (server 01:00-05:59) lose the most "
-        "(see Breakdown > Entry hour).",
-        "WHAT TO CHANGE: use a stop several times larger (e.g. $5-$12, see v7 EA), take profit at 2R, "
-        "breakeven at +1R, no 10-point trail, and test each change on its own.",
-    ]
+    notes = diagnosis_notes(trades)
     for n in notes:
         r += 1
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
@@ -408,7 +461,7 @@ def build(src, dst):
         row += 2
 
     block("By side", "F", ["BUY", "SELL"], "Is one direction worse than the other?")
-    block("By exit reason", "T", ["Initial stop loss", "Breakeven/trailing stop", "Moved stop (below entry)",
+    block("By exit reason", "T", ["Take profit", "Initial stop loss", "Breakeven/trailing stop", "Moved stop (below entry)",
                                   "Closed by EA (no SL)"],
           "Avg R on 'Initial stop loss' below -1R means the stop filled worse than planned (slippage).")
     block("By hold time", "Q", ["a) <10s", "b) 10-60s", "c) 1-10min", "d) >10min"],
