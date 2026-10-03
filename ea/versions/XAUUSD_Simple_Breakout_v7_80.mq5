@@ -182,6 +182,7 @@ input double InpScoreWorstR     = 3.0;      // Score 0 if any trade lost more th
 input group "=== 7. Diagnostics ==="
 input bool   InpTradeLog        = true;     // Write every trade to Common\Files\SB_trades_<symbol>.csv (single tests, not optimisation)
 input int    InpPostExitMin     = 240;      // ...and follow price this many minutes after the exit
+input string InpLogTag          = "";       // Added to the log file name, e.g. T03 -> SB_trades_<symbol>_T03.csv
 
 // Distance inputs converted to price once in OnInit (see InpDistUnit).
 double   g_unit, g_SL, g_BEtrig, g_BElock, g_TrStart, g_TrDist, g_TrStep;
@@ -866,7 +867,7 @@ string TLPx(double v) { return DoubleToString(v, _Digits); }
 void TL_Init()
   {
    if(!InpTradeLog || MQLInfoInteger(MQL_OPTIMIZATION)) return;
-   string name = "SB_trades_" + _Symbol + ".csv";
+   string name = "SB_trades_" + _Symbol + (InpLogTag != "" ? "_" + InpLogTag : "") + ".csv";
    g_tlFile = FileOpen(name, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
    if(g_tlFile == INVALID_HANDLE) { PrintFormat("Trade log: cannot open %s (error %d)", name, GetLastError()); return; }
    FileWrite(g_tlFile, "setup", "side", "open_time", "level", "fill", "entry_slip", "spread_at_entry", "sl_dist", "tp_dist",

@@ -455,3 +455,27 @@ hour, and flags data warnings (fills far better than the level, zero spreads).
 How to read it: many **immediate reversals** → the entry needs a filter (confirmation candle, trend, time). Many
 **stopped then TP hit** → the stop is too tight or the entry too early. Many **+1R then lost** → breakeven / partial
 exit. Data-check issues → fix the data before trusting any optimisation.
+
+## 19. Improvement plan: one test at a time (`ea/presets/tests/`)
+
+The data check on XAUUSD.T is clean (0 D1/M1 mismatches, 0 weekend bars, 17 holiday days missing, 35-point average
+spread), so improvements must come from the strategy. Each preset changes **one** thing compared with `T00_baseline`
+(SL $14, TP 3R, no breakeven, no filters, 0.5% risk). Run every test with the same dates, symbol, real ticks and a
+$100,000 deposit. Each one writes its own trade log `SB_trades_<symbol>_Txx.csv` (`InpLogTag`).
+
+| Test | Change | Why (evidence from earlier reports) |
+|---|---|---|
+| T01 | No entries 15:15–16:00 | biggest losses were 15:30 US-data spikes (−5R…−9R) |
+| T02 | No entries 15:15–17:00 | same, wider |
+| T03 | Entry after an M5 close beyond the level | trades closed < 1 h lost (fast false breakouts) |
+| T04 | Close, then retest limit at the level | same, better entry price |
+| T05 | Stop-limit, max $1 slip | spike fills far past the level |
+| T06 | Breakeven at +1R | profit given back before the daily close |
+| T07 | Hold overnight, close Fridays | overnight trades were the profitable ones (Code1) |
+| T08 | No entries after 19:00 | 19–21 h entries lost (Code2) |
+| T09 / T10 | PDH only / range only | PDH buys strong, range buys weak |
+| T11 / T12 | Skip ranges < $10 / > $80 | tiny ranges = noise, huge = move already done |
+
+Keep a change only if **profit factor and drawdown both improve**, ideally in 2022–2024 **and** 2025–2026 separately.
+Then combine the winners, test the combination, and finally run one small optimisation (SL 12–16 × TP 2–4) with
+Forward 1/3 on the combined version.
