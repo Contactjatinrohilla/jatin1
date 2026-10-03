@@ -430,3 +430,28 @@ symbol's chart; trades and setups are kept per symbol, and the daily loss stop a
 These are starting points, not tested settings. Backtest each on its own symbol with 100% real ticks and optimise
 with `opt1_exits`-style ranges in that symbol's units. Check that your broker's index CFD (e.g. `USTEC`, `NAS100`,
 `US100.cash`) shows the NY cash open at 16:30 server time.
+
+## 18. v7.80: finding out WHY trades lose (reversal vs stop vs data)
+
+An optimisation report only has totals per pass, so it can't show whether trades reverse from the entry. v7.80
+adds a **trade log** and there is a separate **data check** script.
+
+**1. Trade log (EA, section 7):** `InpTradeLog = true` (default). In single tests, not optimisations, the EA writes
+`SB_trades_<symbol>.csv` to the terminal's **Common\Files** folder (MetaEditor → File → Open Common Data Folder →
+Files). One row per trade: setup, side, level, fill, entry slippage, spread at entry, SL/TP distance, **MFE** (best
+move in our favour) and **MAE** (worst move against), minutes to MFE, exit reason, R, and the best move in the trade's
+direction during `InpPostExitMin` (240) minutes **after** the exit, including whether the TP would still have been hit.
+
+**2. Data check (`ea/scripts/SB_DataCheck.mq5`):** copy it to `MQL5\Scripts`, compile, then drag it onto the
+XAUUSD.T chart. It writes `SB_datacheck_<symbol>.csv` (one row per day) and a summary covering: D1 high/low vs M1
+mismatch (wrong PDH), weekend bars (time zone), weekdays without data, gaps, spikes, zero or wide spreads, and the
+usual first/last bar hour.
+
+**3. Analyse:** `python3 tools/analyze_trade_log.py SB_trades_XAUUSD.T.csv` sorts every trade into: TP win ·
+immediate reversal (never +0.25R = false breakout) · reversal then TP hit anyway (stop too tight) · was +1R then
+gave it all back (needs breakeven) · partial move then reversal. It also breaks results down by setup/side and entry
+hour, and flags data warnings (fills far better than the level, zero spreads).
+
+How to read it: many **immediate reversals** → the entry needs a filter (confirmation candle, trend, time). Many
+**stopped then TP hit** → the stop is too tight or the entry too early. Many **+1R then lost** → breakeven / partial
+exit. Data-check issues → fix the data before trusting any optimisation.
