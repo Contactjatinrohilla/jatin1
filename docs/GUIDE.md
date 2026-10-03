@@ -479,3 +479,23 @@ $100,000 deposit. Each one writes its own trade log `SB_trades_<symbol>_Txx.csv`
 Keep a change only if **profit factor and drawdown both improve**, ideally in 2022–2024 **and** 2025–2026 separately.
 Then combine the winners, test the combination, and finally run one small optimisation (SL 12–16 × TP 2–4) with
 Forward 1/3 on the combined version.
+
+## 20. Backtesting with your prop firm's spread (`ea/scripts/SB_MakeSpreadSymbol.mq5`)
+
+With "Every tick based on real ticks" MT5 uses the spread stored in the ticks (XAUUSD.T ≈ 35–55 points) and has no
+spread setting. This script makes a **custom symbol**: an exact copy of the chart symbol (same bid ticks, times,
+contract size and sessions) with the spread you choose:
+
+| `InpMode` | Spread on every tick |
+|---|---|
+| FIXED | always `InpSpreadMin` |
+| CLIP (default) | the real spread, limited to `InpSpreadMin`..`InpSpreadMax` (e.g. 20..30), so news widening is kept but capped |
+| RANDOM | random between min and max |
+
+1. Copy the script to `MQL5\Scripts`, compile with F7.
+2. Open an **XAUUSD.T** chart, drag the script onto it, set the dates (2022.04.01 → 2026.10.02), mode CLIP, 20 / 30, then OK.
+3. Wait until it shows `DONE: XAUUSD.T_S20-30 created …`. It copies one day at a time, so 4.5 years can take a while.
+4. Strategy Tester → Symbol **XAUUSD.T_S20-30** → Every tick based on real ticks → run the EA as usual.
+
+Only the ask price changes. Bid prices, PDH/PDL levels and candles are identical to XAUUSD.T, so any difference in
+results comes from the spread alone.
