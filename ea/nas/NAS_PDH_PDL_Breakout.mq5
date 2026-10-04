@@ -9,18 +9,20 @@
 //|  the New York session we follow the break.                        |
 //|                                                                  |
 //|  How it works                                                    |
-//|   1. Every new server day the EA works out PDH and PDL, either    |
-//|      from yesterday's daily candle or from yesterday's cash       |
-//|      session only (16:30-23:00 server time by default).           |
-//|   2. When the trading window opens it places a BUY STOP just      |
+//|   1. Every new server day the EA works out PDH and PDL from      |
+//|      yesterday's FULL daily candle (the whole ~23h CFD day), or   |
+//|      optionally from yesterday's cash session only.               |
+//|   2. When the trading window opens (default: the whole day, from |
+//|      the first tick after 00:00) it places a BUY STOP just        |
 //|      above PDH and a SELL STOP just below PDL (filters below).    |
 //|   3. When one of them fills, the other one is deleted. At most    |
 //|      one trade per day.                                           |
 //|   4. Stop loss / take profit are set on the order. Optional       |
 //|      breakeven and trailing stop move the stop loss in profit.    |
 //|   5. At the window end (and on Friday at FridayClose) everything  |
-//|      is closed - no trade is ever held overnight or over the      |
-//|      weekend.                                                     |
+//|      is closed - no trade is held overnight or over the weekend.  |
+//|      The window end moves to 5 minutes before the broker's daily  |
+//|      session close when that is earlier.                          |
 //|                                                                  |
 //|  ALL distances are in POINTS (the symbol's smallest price step,   |
 //|  _Point). On a 2-decimal Nasdaq quote 100 points = 1.00 index     |
@@ -28,7 +30,7 @@
 //|  ALL times are SERVER time (the time shown in Market Watch).      |
 //+------------------------------------------------------------------+
 #property copyright "NAS PDH PDL Breakout"
-#property version   "1.00"
+#property version   "1.10"
 #property description "Previous-day high/low breakout for Nasdaq 100 CFDs (NAS100 / US100 / USTEC)."
 
 #include <Trade\Trade.mqh>
@@ -65,7 +67,7 @@ input string            InpCashEnd          = "23:00";   // Cash session end, se
 
 //=== 2. Entry =======================================================
 input group "=== 2. Entry ==="
-input string            InpWindow             = "16:30-22:30"; // Trading window, server time HH:MM-HH:MM
+input string            InpWindow             = "00:00-23:55"; // Trading window, server time (default = whole day; ends 5 min before the session close)
 input int               InpEntryBufferPoints  = 0;      // Entry this many points beyond PDH / PDL
 input int               InpMaxGapPoints       = 0;      // Skip the day if price is this far beyond a level at the window start (0 = off)
 input int               InpMinRangePoints     = 0;      // Skip the day if PDH - PDL is smaller than this (0 = off)
@@ -111,6 +113,7 @@ int      g_winStart = 0, g_winEnd = 0;       // trading window, minutes after se
 int      g_cashStart = 0, g_cashEnd = 0;     // cash session, minutes after server midnight
 int      g_friClose = 0;                     // Friday close, minutes after server midnight
 datetime g_day = 0;                          // current server day (midnight)
+int      g_dayEnd = 0;                       // today's real window end (window end or session close - 5 min)
 bool     g_levelsOk = false;                 // PDH / PDL valid for today
 double   g_pdh = 0.0, g_pdl = 0.0;
 string   g_levelDay = "";                    // date the levels were taken from
@@ -236,6 +239,19 @@ void CloseAll(const string why)
      }
   }
 
+// Last minute of the broker's trade session on this weekday (1440 if unknown).
+int SessionEndMinute(const int dow)
+  {
+   datetime from = 0, to = 0;
+   long     last = -1;
+   for(uint i = 0; i < 10; i++)
+     {
+      if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, from, to)) break;
+      last = MathMax(last, (long)to / 60);
+     }
+   return (last <= 0) ? 1440 : (int)MathMin(1440, last);
+  }
+
 //+------------------------------------------------------------------+
 //|  Levels                                                          |
 //+------------------------------------------------------------------+
@@ -333,6 +349,10 @@ void NewDay(const datetime today)
    g_ordersDone   = false;
    g_tradedToday  = false;
    g_spreadLogged = false;
+   g_dayEnd       = (int)MathMin(g_winEnd, SessionEndMinute(DayOfWeek(today)) - 5);
+   if(g_dayEnd < g_winEnd)
+      PrintFormat("Session closes at %02d:%02d today - everything is closed at %02d:%02d", (g_dayEnd + 5) / 60, (g_dayEnd + 5) % 60,
+                  g_dayEnd / 60, g_dayEnd % 60);
    g_levelsOk     = (InpLevelSource == LEVEL_D1) ? LevelsFromD1(today) : LevelsFromCash(today);
 
    // after a restart: did we already trade today / are our orders already there?
@@ -650,7 +670,7 @@ void OnTick()
      }
 
    // window end: nothing is held after it
-   if(mins >= g_winEnd)
+   if(mins >= g_dayEnd)
      {
       if(CountPendings() > 0) DeletePendings("window end");
       if(CountPositions() > 0) CloseAll("window end");
