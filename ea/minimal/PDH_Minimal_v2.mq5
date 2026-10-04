@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal_v2.mq5  v1.03                   |
+//|                         PDH_Minimal_v2.mq5  v1.10                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -14,12 +14,16 @@
 //|                                                                  |
 //|  One position at a time, one trade per side per day. Unfilled     |
 //|  orders deleted and open trades closed at the window end.         |
-//|  No breakeven, no trailing, no filters. Times = server time.      |
-//|  Optimisation: SL is tested from $1 to $50 (step 0.5) and RR from |
-//|  1 to 10 (step 0.5) whatever the Inputs table shows - just tick.  |
+//|  Breakeven: at +BE_Trigger $ the SL moves to entry +BE_Lock $.    |
+//|  Trailing: from +TrailStart $ the SL follows TrailDist $ behind.  |
+//|  Both 0 = off. The SL only moves in the trade's favour.           |
+//|  No filters. Times = server time.                                 |
+//|  Optimisation (whatever the Inputs table shows - just tick):       |
+//|  SL 1..50 step 0.5, RR 1..10 step 0.5, breakeven and trailing     |
+//|  inputs 0.1..100 step 0.1.                                        |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.03"
-#property version   "1.03"
+#property copyright "PDH Minimal v1.10"
+#property version   "1.10"
 
 #include <Trade\Trade.mqh>
 
@@ -30,6 +34,10 @@ input double    InpSL_USD  = 1.0;            // SL in $ (sweep: maximum SL) - fo
 input double    InpRR      = 1.0;            // TP = SL x RR - for a single test type e.g. 2
 input double    InpRiskPct = 0.5;            // Risk % of balance per trade
 input string    InpWindow  = "03:00-22:00";  // Trading window, server time (orders/entries inside, everything closed at the end)
+input double    InpBE_Trigger = 0.0;         // Breakeven: when the trade is this many $ in profit (0 = off)
+input double    InpBE_Lock    = 0.0;         // Breakeven: move the SL to entry + this many $ (must be < trigger)
+input double    InpTrailStart = 0.0;         // Trailing: starts when the trade is this many $ in profit (0 = off)
+input double    InpTrailDist  = 0.0;         // Trailing: SL stays this many $ behind price
 
 #define MAGIC      910000
 #define SWEEP_MIN  0.50      // sweep must go this far beyond the level ($)
@@ -104,11 +112,18 @@ int OnInit()
       Print("Invalid inputs: window HH:MM-HH:MM (start before end), SL > 0, RR > 0, risk 0-5%");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpBE_Trigger < 0 || InpBE_Lock < 0 || InpTrailStart < 0 || InpTrailDist < 0 ||
+      (InpBE_Trigger > 0 && InpBE_Lock >= InpBE_Trigger) || (InpTrailStart > 0 && InpTrailDist <= 0))
+     {
+      Print("Invalid inputs: BE lock must be below BE trigger, trail distance > 0 when trailing is on");
+      return INIT_PARAMETERS_INCORRECT;
+     }
    trade.SetExpertMagicNumber(MAGIC);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(50);
-   PrintFormat("PDH Minimal v2 | %s | SL $%g | RR %g | risk %.2f%% | window %s", InpMode == MODE_BREAKOUT ? "BREAKOUT" : "SWEEP",
-               InpSL_USD, InpRR, InpRiskPct, InpWindow);
+   PrintFormat("PDH Minimal v2 | %s | SL $%g | RR %g | risk %.2f%% | window %s | BE %g -> +%g | trail from %g, %g behind",
+               InpMode == MODE_BREAKOUT ? "BREAKOUT" : "SWEEP", InpSL_USD, InpRR, InpRiskPct, InpWindow,
+               InpBE_Trigger, InpBE_Lock, InpTrailStart, InpTrailDist);
    return INIT_SUCCEEDED;
   }
 
@@ -130,6 +145,8 @@ void OnTick()
       PrintFormat("=== %s  PDH %.*f  PDL %.*f", TimeToString(today, TIME_DATE), _Digits, pdh, _Digits, pdl);
      }
 
+   ManageStops();
+
    // window end: delete orders, close trades
    if(mins >= winEnd) { DeleteOrders(); CloseAll(); return; }
    if(mins < winStart) return;
@@ -138,6 +155,39 @@ void OnTick()
 
    if(InpMode == MODE_BREAKOUT) Breakout();
    else                         Sweep();
+  }
+
+// Breakeven and trailing stop. The SL never moves backwards and stays outside the broker's stop level.
+void ManageStops()
+  {
+   if(InpBE_Trigger <= 0 && InpTrailStart <= 0) return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double gap = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * _Point;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != MAGIC) continue;
+      bool   buy    = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double px     = buy ? bid : ask;
+      double profit = buy ? bid - open : open - ask;
+      double newSL  = sl;
+      if(InpBE_Trigger > 0 && profit >= InpBE_Trigger)
+        {
+         double be = Norm(buy ? open + InpBE_Lock : open - InpBE_Lock);
+         if(buy ? be > newSL : (newSL == 0 || be < newSL)) newSL = be;
+        }
+      if(InpTrailStart > 0 && profit >= InpTrailStart)
+        {
+         double tr = Norm(buy ? px - InpTrailDist : px + InpTrailDist);
+         if(buy ? tr > newSL : (newSL == 0 || tr < newSL)) newSL = tr;
+        }
+      if(buy ? px - newSL < gap : newSL - px < gap) newSL = Norm(buy ? px - gap : px + gap);
+      if(MathAbs(newSL - sl) < 0.1 || (buy ? newSL <= sl : (sl > 0 && newSL >= sl))) continue;   // move in steps of >= $0.10
+      if(trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP)))
+         PrintFormat("SL %.*f -> %.*f (profit %.2f)", _Digits, sl, _Digits, newSL, profit);
+     }
   }
 
 // BREAKOUT: stop orders at PDH / PDL once per day, only on the side price has not passed.
@@ -216,7 +266,10 @@ int OnTesterInit()
    bool on; double v, a, b, c;
    if(ParameterGetRange("InpSL_USD", on, v, a, b, c)) ParameterSetRange("InpSL_USD", on, v, 1.0, 0.5, 50.0);
    if(ParameterGetRange("InpRR", on, v, a, b, c))     ParameterSetRange("InpRR", on, v, 1.0, 0.5, 10.0);
-   Print("Optimisation ranges: SL 1..50 step 0.5, RR 1..10 step 0.5");
+   string bt[] = {"InpBE_Trigger", "InpBE_Lock", "InpTrailStart", "InpTrailDist"};
+   for(int i = 0; i < ArraySize(bt); i++)
+      if(ParameterGetRange(bt[i], on, v, a, b, c)) ParameterSetRange(bt[i], on, v, 0.1, 0.1, 100.0);
+   Print("Optimisation ranges: SL 1..50 step 0.5, RR 1..10 step 0.5, breakeven/trailing 0.1..100 step 0.1");
    return INIT_SUCCEEDED;
   }
 
