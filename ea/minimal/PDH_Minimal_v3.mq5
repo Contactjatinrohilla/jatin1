@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal_v3.mq5  v1.30                   |
+//|                         PDH_Minimal_v3.mq5  v1.31                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -12,7 +12,7 @@
 //|            InpConfirmBars candle(s) close inside AND in the trade |
 //|            direction (red for a sell, green for a buy) -> market  |
 //|            order. SL = sweep extreme + $0.50 (skipped if wider    |
-//|            than InpSL_USD), TP = SL x InpRR.                       |
+//|            than InpSweepMaxSL), TP = SL x InpRR.                       |
 //|                                                                  |
 //|  One position at a time, one trade per side per day. Unfilled     |
 //|  orders deleted and open trades closed at the window end.         |
@@ -24,18 +24,19 @@
 //|  SL 1..50 step 0.5, RR 1..10 step 0.5, breakeven and trailing     |
 //|  inputs 0.1..100 step 0.1.                                        |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.30"
-#property version   "1.30"
+#property copyright "PDH Minimal v1.31"
+#property version   "1.31"
 
 #include <Trade\Trade.mqh>
 
 enum ENUM_MODE { MODE_BREAKOUT = 0, MODE_SWEEP = 1 };
 
 input ENUM_MODE InpMode    = MODE_BREAKOUT;  // Mode: breakout or sweep reversal
-input double    InpSL_USD  = 1.0;            // SL in $ (sweep: maximum SL) - for a single test type e.g. 14
+input double    InpSL_USD  = 1.0;            // BREAKOUT: SL in $ - for a single test type e.g. 14
 input double    InpRR      = 1.0;            // TP = SL x RR - for a single test type e.g. 2
 input double    InpRiskPct = 0.5;            // Risk % of balance per trade
 input string    InpWindow  = "03:00-22:00";  // Trading window, server time (orders/entries inside, everything closed at the end)
+input double    InpSweepMaxSL = 15.0;         // SWEEP: maximum SL in $ (the SL sits beyond the sweep extreme)
 input ENUM_TIMEFRAMES InpSweepTF = PERIOD_M5;  // Sweep: candle timeframe
 input int       InpConfirmBars = 1;           // Sweep: confirmation candles after the close back inside (0 = enter on that close)
 input bool      InpUseBE      = false;       // Breakeven ON/OFF (set true to use / optimise the two breakeven inputs)
@@ -115,6 +116,7 @@ int OnInit()
    if(StringSplit(InpWindow, '-', p) != 2) return INIT_PARAMETERS_INCORRECT;
    winStart = ParseHHMM(p[0]);
    winEnd   = ParseHHMM(p[1]);
+   if(InpSweepMaxSL <= 0) { Print("SweepMaxSL must be > 0"); return INIT_PARAMETERS_INCORRECT; }
    if(InpConfirmBars < 0) { Print("ConfirmBars must be >= 0"); return INIT_PARAMETERS_INCORRECT; }
    if(winStart < 0 || winEnd <= winStart || InpSL_USD <= 0 || InpRR <= 0 || InpRiskPct <= 0 || InpRiskPct > 5)
      {
@@ -130,8 +132,9 @@ int OnInit()
    trade.SetExpertMagicNumber(MAGIC);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(50);
-   PrintFormat("PDH Minimal v3 | %s | SL $%g | RR %g | risk %.2f%% | window %s | BE %s | trail %s",
-               InpMode == MODE_BREAKOUT ? "BREAKOUT" : "SWEEP", InpSL_USD, InpRR, InpRiskPct, InpWindow,
+   PrintFormat("PDH Minimal v3 | %s | %s $%g | RR %g | risk %.2f%% | window %s | BE %s | trail %s",
+               InpMode == MODE_BREAKOUT ? "BREAKOUT" : "SWEEP", InpMode == MODE_BREAKOUT ? "SL" : "max SL",
+               InpMode == MODE_BREAKOUT ? InpSL_USD : InpSweepMaxSL, InpRR, InpRiskPct, InpWindow,
                InpUseBE ? StringFormat("at +%g -> entry +%g", InpBE_Trigger, InpBE_Lock) : "off",
                InpUseTrail ? StringFormat("from +%g, %g behind", InpTrailStart, InpTrailDist) : "off");
    return INIT_SUCCEEDED;
@@ -297,7 +300,7 @@ void Sweep()
       double dist = MathAbs(px - sl);
       double tp   = Norm(buy ? px + dist * InpRR : px - dist * InpRR);
       if(buy ? px <= sl : px >= sl) { PrintFormat("%s: price already beyond the SL - skipped", name); continue; }
-      if(dist > InpSL_USD) { PrintFormat("%s: SL $%.2f > max $%g - skipped", name, dist, InpSL_USD); continue; }
+      if(dist > InpSweepMaxSL) { PrintFormat("%s: SL $%.2f > max $%g - skipped", name, dist, InpSweepMaxSL); continue; }
       double lot = Lot(buy, px, sl);
       if(lot <= 0) continue;
       if(buy) trade.Buy(lot, _Symbol, 0, sl, tp, "PDL_SWEEP_BUY");
@@ -312,6 +315,7 @@ int OnTesterInit()
    bool on; double v, a, b, c;
    if(ParameterGetRange("InpSL_USD", on, v, a, b, c)) ParameterSetRange("InpSL_USD", on, v, 1.0, 0.5, 50.0);
    if(ParameterGetRange("InpRR", on, v, a, b, c))     ParameterSetRange("InpRR", on, v, 1.0, 0.5, 10.0);
+   if(ParameterGetRange("InpSweepMaxSL", on, v, a, b, c)) ParameterSetRange("InpSweepMaxSL", on, v, 1.0, 0.5, 50.0);
    string bt[] = {"InpBE_Trigger", "InpBE_Lock", "InpTrailStart", "InpTrailDist"};
    for(int i = 0; i < ArraySize(bt); i++)
       if(ParameterGetRange(bt[i], on, v, a, b, c)) ParameterSetRange(bt[i], on, v, 0.1, 0.1, 100.0);
