@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal.mq5   v1.01                   |
+//|                         PDH_Minimal.mq5   v1.02                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -18,16 +18,16 @@
 //|  Optimisation: SL is tested from $1 to $50 (step 0.5) and RR from |
 //|  1 to 10 (step 0.5) whatever the Inputs table shows - just tick.  |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.01"
-#property version   "1.01"
+#property copyright "PDH Minimal v1.02"
+#property version   "1.02"
 
 #include <Trade\Trade.mqh>
 
 enum ENUM_MODE { MODE_BREAKOUT = 0, MODE_SWEEP = 1 };
 
 input ENUM_MODE InpMode    = MODE_BREAKOUT;  // Mode: breakout or sweep reversal
-input double    InpSL_USD  = 14.0;           // SL in $ (sweep: maximum SL)
-input double    InpRR      = 2.0;            // TP = SL x RR
+input double    InpSL_USD  = 1.0;            // SL in $ (sweep: maximum SL) - for a single test type e.g. 14
+input double    InpRR      = 1.0;            // TP = SL x RR - for a single test type e.g. 2
 input double    InpRiskPct = 0.5;            // Risk % of balance per trade
 input string    InpWindow  = "03:00-22:00";  // Trading window, server time (orders/entries inside, everything closed at the end)
 
