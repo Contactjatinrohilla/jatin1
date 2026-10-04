@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal_v3.mq5  v1.31                   |
+//|                         PDH_Minimal_v3.mq5  v1.32                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -24,8 +24,8 @@
 //|  SL 1..50 step 0.5, RR 1..10 step 0.5, breakeven and trailing     |
 //|  inputs 0.1..100 step 0.1.                                        |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.31"
-#property version   "1.31"
+#property copyright "PDH Minimal v1.32"
+#property version   "1.32"
 
 #include <Trade\Trade.mqh>
 
@@ -72,6 +72,17 @@ int ParseHHMM(string s)
   }
 
 double Norm(double p) { return NormalizeDouble(p, _Digits); }
+
+// PDH / PDL line for the day (so the levels are visible in both modes)
+void DrawLevel(string name, datetime d, double price, color clr, string label)
+  {
+   if(MQLInfoInteger(MQL_OPTIMIZATION) || ObjectFind(0, name) >= 0) return;
+   ObjectCreate(0, name, OBJ_TREND, 0, d, price, d + 86400 - 60, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetString(0, name, OBJPROP_TEXT, StringFormat("%s %.*f", label, _Digits, price));
+  }
 
 int MyPositions()
   {
@@ -157,6 +168,8 @@ void OnTick()
       for(int k = 0; k < 2; k++)
         { sideDone[k] = false; swept[k] = false; reclaimed[k] = false; swExt[k] = 0; swBars[k] = 0; confBars[k] = 0; waitBars[k] = 0; }
       PrintFormat("=== %s  PDH %.*f  PDL %.*f", TimeToString(today, TIME_DATE), _Digits, pdh, _Digits, pdl);
+      DrawLevel("PDH_" + TimeToString(today, TIME_DATE), today, pdh, clrDodgerBlue, "PDH");
+      DrawLevel("PDL_" + TimeToString(today, TIME_DATE), today, pdl, clrOrangeRed, "PDL");
      }
 
    ManageStops();
