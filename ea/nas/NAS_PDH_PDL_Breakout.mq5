@@ -5,8 +5,8 @@
 //|  breakout.                                                       |
 //|                                                                  |
 //|  Idea in one sentence: yesterday's high (PDH) and low (PDL) are   |
-//|  levels many traders watch; when price breaks one of them during  |
-//|  the New York session we follow the break.                        |
+//|  levels many traders watch; when price breaks one of them we     |
+//|  follow the break (any time of the day, 24h CFD market).          |
 //|                                                                  |
 //|  How it works                                                    |
 //|   1. Every new server day the EA works out PDH and PDL from      |
