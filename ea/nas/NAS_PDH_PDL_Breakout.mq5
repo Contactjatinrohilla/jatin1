@@ -29,7 +29,7 @@
 //|  ALL times are SERVER time (the time shown in Market Watch).      |
 //+------------------------------------------------------------------+
 #property copyright "NAS PDH PDL Breakout"
-#property version   "1.21"
+#property version   "1.22"
 #property description "Previous-day high/low breakout for Nasdaq 100 CFDs (NAS100 / US100 / USTEC)."
 
 #include <Trade\Trade.mqh>
@@ -429,6 +429,26 @@ double LotForRisk(const bool buy, const double entry, const double sl)
       return 0.0;
      }
    lots = MathMin(lots, vmax);
+
+   // margin check: the broker must be able to open this lot with the free margin we have
+   double margin1Lot = 0.0;
+   if(OrderCalcMargin(buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, 1.0, entry, margin1Lot) && margin1Lot > 0.0)
+     {
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE) * 0.90;      // keep 10% spare
+      double maxByMargin = MathFloor(freeMargin / margin1Lot / step + 1e-9) * step;
+      if(lots > maxByMargin)
+        {
+         if(maxByMargin < vmin)
+           {
+            PrintFormat("Trade skipped: %.2f lots needs %.2f margin, only %.2f free (1 lot = %.2f margin). Use a bigger deposit.",
+                        lots, lots * margin1Lot, AccountInfoDouble(ACCOUNT_MARGIN_FREE), margin1Lot);
+            return 0.0;
+           }
+         PrintFormat("Lot reduced from %.2f to %.2f to fit the free margin (1 lot = %.2f margin) - risk is now below %.2f%%",
+                     lots, maxByMargin, margin1Lot, InpRiskPct);
+         lots = maxByMargin;
+        }
+     }
    int volDigits = (int)MathMax(0.0, MathRound(-MathLog10(step)));
    return NormalizeDouble(lots, volDigits);
   }
