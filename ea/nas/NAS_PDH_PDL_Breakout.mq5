@@ -249,7 +249,7 @@ int SessionEndMinute(const int dow)
       if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, i, from, to)) break;
       last = MathMax(last, (long)to / 60);
      }
-   return (last <= 0) ? 1440 : (int)MathMin(1440, last);
+   return (last <= 0) ? 1440 : (int)MathMin((long)1440, last);
   }
 
 //+------------------------------------------------------------------+
