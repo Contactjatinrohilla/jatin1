@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal.mq5   v1.00                   |
+//|                         PDH_Minimal.mq5   v1.01                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -15,9 +15,11 @@
 //|  One position at a time, one trade per side per day. Unfilled     |
 //|  orders deleted and open trades closed at the window end.         |
 //|  No breakeven, no trailing, no filters. Times = server time.      |
+//|  Optimisation: SL is tested from $1 to $50 (step 0.5) and RR from |
+//|  1 to 10 (step 0.5) whatever the Inputs table shows - just tick.  |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.00"
-#property version   "1.00"
+#property copyright "PDH Minimal v1.01"
+#property version   "1.01"
 
 #include <Trade\Trade.mqh>
 
@@ -207,4 +209,16 @@ void Sweep()
       return;
      }
   }
+
+// Optimisation ranges start from 1 (MetaTrader's table shows its own numbers, these are used).
+int OnTesterInit()
+  {
+   bool on; double v, a, b, c;
+   if(ParameterGetRange("InpSL_USD", on, v, a, b, c)) ParameterSetRange("InpSL_USD", on, v, 1.0, 0.5, 50.0);
+   if(ParameterGetRange("InpRR", on, v, a, b, c))     ParameterSetRange("InpRR", on, v, 1.0, 0.5, 10.0);
+   Print("Optimisation ranges: SL 1..50 step 0.5, RR 1..10 step 0.5");
+   return INIT_SUCCEEDED;
+  }
+
+void OnTesterDeinit() { }
 //+------------------------------------------------------------------+
