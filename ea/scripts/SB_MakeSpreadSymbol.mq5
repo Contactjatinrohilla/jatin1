@@ -19,7 +19,7 @@
 //|  added to Market Watch, e.g. XAUUSD.T_S25.                        |
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Simple Breakout - spread copy"
-#property version   "1.00"
+#property version   "1.10"
 #property script_show_inputs
 
 enum ENUM_SPREAD_MODE
@@ -35,6 +35,7 @@ input ENUM_SPREAD_MODE InpMode      = SPM_CLIP;        // Spread mode
 input int              InpSpreadMin = 20;              // Spread min / fixed (points)
 input int              InpSpreadMax = 30;              // Spread max (points)
 input string           InpSuffix    = "";              // New symbol suffix ("" = _S<min>-<max> / _S<min>)
+input bool             InpResume    = true;            // Symbol already exists: continue from its last copied day
 
 void OnStart()
   {
@@ -63,6 +64,16 @@ void OnStart()
    double sprSum = 0;
    int    daysDone = 0, daysEmpty = 0;
    datetime start = (datetime)((long)InpFrom - (long)InpFrom % 86400);
+   if(exists && InpResume)
+     {
+      datetime lastBar = (datetime)SeriesInfoInteger(dst, PERIOD_M1, SERIES_LASTBAR_DATE);
+      if(lastBar > start)
+        {
+         start = (datetime)((long)lastBar - (long)lastBar % 86400);   // re-copy the last day (it may be incomplete)
+         PrintFormat("%s already has data up to %s - continuing from %s", dst, TimeToString(lastBar), TimeToString(start, TIME_DATE));
+        }
+     }
+   double totalDays = MathMax(1.0, (double)(InpTo - start) / 86400.0);
 
    for(datetime day = start; day < InpTo && !IsStopped(); day += 86400)
      {
@@ -108,11 +119,17 @@ void OnStart()
       totalTicks += kept;
       daysDone++;
       if(daysDone % 10 == 0)
-         Comment(StringFormat("Copying %s -> %s : %s  (%d days, %I64d ticks)", src, dst, TimeToString(day, TIME_DATE),
+         Comment(StringFormat("Copying %s -> %s : %s  %.0f%% done (%d days, %I64d ticks). Keep this chart open until the DONE message.",
+                              src, dst, TimeToString(day, TIME_DATE), 100.0 * (double)(day - start) / 86400.0 / totalDays,
                               daysDone, totalTicks));
      }
    Comment("");
    SymbolSelect(dst, true);
+   if(IsStopped())
+     {
+      Alert("STOPPED before the end - run the script again with Resume = true to continue from where it stopped.");
+      return;
+     }
    string msg = StringFormat("DONE: %s created from %s | %d days, %I64d ticks | average spread %.1f points | %d days without ticks "
                              "(weekends/holidays). Backtest the EA on %s with 'Every tick based on real ticks'.",
                              dst, src, daysDone, totalTicks, totalTicks > 0 ? sprSum / totalTicks : 0, daysEmpty, dst);
