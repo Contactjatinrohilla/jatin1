@@ -29,7 +29,7 @@
 //|  ALL times are SERVER time (the time shown in Market Watch).      |
 //+------------------------------------------------------------------+
 #property copyright "NAS PDH PDL Breakout"
-#property version   "1.20"
+#property version   "1.21"
 #property description "Previous-day high/low breakout for Nasdaq 100 CFDs (NAS100 / US100 / USTEC)."
 
 #include <Trade\Trade.mqh>
@@ -61,6 +61,7 @@ enum ENUM_TRAIL_MODE
 input group "=== 1. Levels ==="
 input ENUM_LEVEL_SOURCE InpLevelSource      = LEVEL_D1;  // Where PDH / PDL come from
 input int               InpMinDailyBarHours = 6;         // D1: ignore daily candles shorter than this (Sunday stubs)
+input double            InpMaxRangePct      = 10.0;      // Bad-data check: skip the day if PDH - PDL is more than this % of the price
 input string            InpCashStart        = "16:30";   // Cash session start, server time (New York 09:30)
 input string            InpCashEnd          = "23:00";   // Cash session end, server time (New York 16:00)
 
@@ -365,6 +366,13 @@ void NewDay(const datetime today)
         }
    if(CountPendings() > 0 || g_tradedToday) g_ordersDone = true;
 
+   // bad-data check: a broken candle in the history (e.g. a low of 98 when the index is at 15000)
+   if(g_levelsOk && (g_pdl <= 0.0 || g_pdh <= g_pdl || (g_pdh - g_pdl) > g_pdh * InpMaxRangePct / 100.0))
+     {
+      PrintFormat("BAD DATA on %s: PDH %.*f PDL %.*f (range %.1f%% of price) - no trading today. Check the symbol's history.",
+                  g_levelDay, _Digits, g_pdh, _Digits, g_pdl, g_pdh > 0.0 ? (g_pdh - g_pdl) / g_pdh * 100.0 : 0.0);
+      g_levelsOk = false;
+     }
    if(!g_levelsOk) { g_status = "no levels today"; return; }
    double rangePts = g_pdh - g_pdl;
    PrintFormat("=== %s | levels from %s (%s) | PDH %.*f  PDL %.*f  range %.2f index points",
@@ -437,6 +445,11 @@ bool PlaceStop(const bool buy, const double entry)
      }
    double sl  = NormPrice(buy ? entry - dist : entry + dist);
    double tp  = InpUseTP ? NormPrice(buy ? entry + dist * InpRR : entry - dist * InpRR) : 0.0;
+   if(sl <= 0.0 || (InpUseTP && tp <= 0.0))
+     {
+      PrintFormat("%s skipped: SL %.*f / TP %.*f would be at or below zero (bad levels)", side, _Digits, sl, _Digits, tp);
+      return false;
+     }
    double lot = LotForRisk(buy, entry, sl);
    if(lot <= 0.0) { PrintFormat("%s skipped: lot size", side); return false; }
 
@@ -628,6 +641,7 @@ int OnInit()
    if(InpTrailMode == TRAIL_STEPPED && (InpTrailStart < 0 || InpStep <= 0 || InpLock <= 0))
       return Fail("Stepped trailing: start >= 0, step > 0 and lock > 0");
    if(InpMinDailyBarHours < 0 || InpMinDailyBarHours > 24) return Fail("MinDailyBarHours must be 0-24");
+   if(InpMaxRangePct <= 0.0) return Fail("MaxRangePct must be > 0");
 
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
