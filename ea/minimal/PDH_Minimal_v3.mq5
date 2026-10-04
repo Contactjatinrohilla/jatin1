@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                         PDH_Minimal_v3.mq5  v1.20                   |
+//|                         PDH_Minimal_v3.mq5  v1.30                   |
 //|                                                                  |
 //|  Previous-day high / low (PDH / PDL) only. Nothing else.          |
 //|                                                                  |
@@ -7,10 +7,12 @@
 //|            PDL (a side price is already beyond is skipped).       |
 //|            First fill deletes the other order.                    |
 //|            SL = InpSL_USD, TP = SL x InpRR.                        |
-//|  SWEEP     M5 candle trades >= $0.50 beyond PDH/PDL and a candle  |
-//|            closes back inside within 6 candles -> market order    |
-//|            back into the range. SL = sweep extreme + $0.50        |
-//|            (skipped if wider than InpSL_USD), TP = SL x InpRR.    |
+//|  SWEEP     a candle (InpSweepTF) trades >= $0.50 beyond PDH/PDL,  |
+//|            a candle closes back inside within 6 candles, then     |
+//|            InpConfirmBars candle(s) close inside AND in the trade |
+//|            direction (red for a sell, green for a buy) -> market  |
+//|            order. SL = sweep extreme + $0.50 (skipped if wider    |
+//|            than InpSL_USD), TP = SL x InpRR.                       |
 //|                                                                  |
 //|  One position at a time, one trade per side per day. Unfilled     |
 //|  orders deleted and open trades closed at the window end.         |
@@ -22,8 +24,8 @@
 //|  SL 1..50 step 0.5, RR 1..10 step 0.5, breakeven and trailing     |
 //|  inputs 0.1..100 step 0.1.                                        |
 //+------------------------------------------------------------------+
-#property copyright "PDH Minimal v1.20"
-#property version   "1.20"
+#property copyright "PDH Minimal v1.30"
+#property version   "1.30"
 
 #include <Trade\Trade.mqh>
 
@@ -34,6 +36,8 @@ input double    InpSL_USD  = 1.0;            // SL in $ (sweep: maximum SL) - fo
 input double    InpRR      = 1.0;            // TP = SL x RR - for a single test type e.g. 2
 input double    InpRiskPct = 0.5;            // Risk % of balance per trade
 input string    InpWindow  = "03:00-22:00";  // Trading window, server time (orders/entries inside, everything closed at the end)
+input ENUM_TIMEFRAMES InpSweepTF = PERIOD_M5;  // Sweep: candle timeframe
+input int       InpConfirmBars = 1;           // Sweep: confirmation candles after the close back inside (0 = enter on that close)
 input bool      InpUseBE      = false;       // Breakeven ON/OFF (set true to use / optimise the two breakeven inputs)
 input double    InpBE_Trigger = 0.1;         // Breakeven: when the trade is this many $ in profit
 input double    InpBE_Lock    = 0.1;         // Breakeven: move the SL to entry + this many $ (not above the trigger)
@@ -53,6 +57,8 @@ double   pdh = 0, pdl = 0;
 bool     placed = false;             // breakout orders placed today
 bool     sideDone[2];                // 0 = high side, 1 = low side
 bool     swept[2];
+bool     reclaimed[2];               // closed back inside, waiting for confirmation
+int      confBars[2], waitBars[2];
 double   swExt[2];
 int      swBars[2];
 
@@ -109,6 +115,7 @@ int OnInit()
    if(StringSplit(InpWindow, '-', p) != 2) return INIT_PARAMETERS_INCORRECT;
    winStart = ParseHHMM(p[0]);
    winEnd   = ParseHHMM(p[1]);
+   if(InpConfirmBars < 0) { Print("ConfirmBars must be >= 0"); return INIT_PARAMETERS_INCORRECT; }
    if(winStart < 0 || winEnd <= winStart || InpSL_USD <= 0 || InpRR <= 0 || InpRiskPct <= 0 || InpRiskPct > 5)
      {
       Print("Invalid inputs: window HH:MM-HH:MM (start before end), SL > 0, RR > 0, risk 0-5%");
@@ -144,7 +151,8 @@ void OnTick()
       pdh = iHigh(_Symbol, PERIOD_D1, 1);
       pdl = iLow(_Symbol, PERIOD_D1, 1);
       placed = false;
-      for(int k = 0; k < 2; k++) { sideDone[k] = false; swept[k] = false; swExt[k] = 0; swBars[k] = 0; }
+      for(int k = 0; k < 2; k++)
+        { sideDone[k] = false; swept[k] = false; reclaimed[k] = false; swExt[k] = 0; swBars[k] = 0; confBars[k] = 0; waitBars[k] = 0; }
       PrintFormat("=== %s  PDH %.*f  PDL %.*f", TimeToString(today, TIME_DATE), _Digits, pdh, _Digits, pdl);
      }
 
@@ -213,48 +221,83 @@ void Breakout()
    else Print("SELL skipped: price already below PDL at the window start");
   }
 
-// SWEEP: checked once per closed M5 candle.
+// SWEEP: checked once per closed candle of InpSweepTF.
+//   1. sweep    : candle that started inside trades >= SWEEP_MIN beyond the level
+//   2. reclaim  : a candle closes back inside within SWEEP_BARS candles
+//   3. confirm  : InpConfirmBars candles close inside AND in the trade direction
+//                 (a close back beyond the level cancels the reclaim and the sweep goes on)
 void Sweep()
   {
-   datetime bar = iTime(_Symbol, PERIOD_M5, 0);
+   datetime bar = iTime(_Symbol, InpSweepTF, 0);
    if(bar == lastBar) return;
    bool first = (lastBar == 0);
    lastBar = bar;
-   if(first || iTime(_Symbol, PERIOD_M5, 1) < day + winStart * 60) return;
+   if(first || iTime(_Symbol, InpSweepTF, 1) < day + winStart * 60) return;
 
-   double h = iHigh(_Symbol, PERIOD_M5, 1), l = iLow(_Symbol, PERIOD_M5, 1);
-   double c = iClose(_Symbol, PERIOD_M5, 1), cPrev = iClose(_Symbol, PERIOD_M5, 2);
+   double o = iOpen(_Symbol, InpSweepTF, 1), h = iHigh(_Symbol, InpSweepTF, 1), l = iLow(_Symbol, InpSweepTF, 1);
+   double c = iClose(_Symbol, InpSweepTF, 1), cPrev = iClose(_Symbol, InpSweepTF, 2);
    for(int k = 0; k < 2; k++)
      {
       if(sideDone[k]) continue;
       bool   high   = (k == 0);
+      string name   = high ? "PDH" : "PDL";
       double level  = high ? pdh : pdl;
       double beyond = high ? h - level : level - l;
+      bool   inside = high ? c < level : c > level;
       if(!swept[k])
         {
          bool startedInside = high ? cPrev <= level : cPrev >= level;
          if(!startedInside || beyond < SWEEP_MIN) continue;
-         swept[k] = true; swExt[k] = high ? h : l; swBars[k] = 0;
-         PrintFormat("%s swept: %.*f (%.2f beyond)", high ? "PDH" : "PDL", _Digits, swExt[k], beyond);
+         swept[k] = true; reclaimed[k] = false; swExt[k] = high ? h : l; swBars[k] = 0;
+         PrintFormat("%s swept: %.*f (%.2f beyond)", name, _Digits, swExt[k], beyond);
         }
       else
         {
          swExt[k] = high ? MathMax(swExt[k], h) : MathMin(swExt[k], l);
          swBars[k]++;
         }
-      bool inside = high ? c < level : c > level;
-      if(!inside)
+
+      if(!reclaimed[k])
         {
-         if(swBars[k] >= SWEEP_BARS) { sideDone[k] = true; PrintFormat("%s: no close back inside in %d candles - real breakout", high ? "PDH" : "PDL", SWEEP_BARS); }
-         continue;
+         if(!inside)
+           {
+            if(swBars[k] >= SWEEP_BARS) { sideDone[k] = true; PrintFormat("%s: no close back inside in %d candles - real breakout", name, SWEEP_BARS); }
+            continue;
+           }
+         reclaimed[k] = true; confBars[k] = 0; waitBars[k] = 0;
+         PrintFormat("%s reclaimed: close %.*f back inside%s", name, _Digits, c,
+                     InpConfirmBars > 0 ? StringFormat(" - waiting for %d confirmation candle(s)", InpConfirmBars) : "");
+         if(InpConfirmBars > 0) continue;
         }
+      else
+        {
+         waitBars[k]++;
+         if(!inside)
+           {
+            reclaimed[k] = false;                                // back beyond the level: the sweep continues
+            PrintFormat("%s: closed back beyond the level - confirmation cancelled, sweep continues", name);
+            if(swBars[k] >= SWEEP_BARS) { sideDone[k] = true; PrintFormat("%s: real breakout", name); }
+            continue;
+           }
+         bool withTrade = high ? c < o : c > o;                  // red candle for a sell, green for a buy
+         if(withTrade) confBars[k]++;
+         if(confBars[k] < InpConfirmBars)
+           {
+            if(waitBars[k] >= SWEEP_BARS) { sideDone[k] = true; PrintFormat("%s: no confirmation within %d candles - skipped", name, SWEEP_BARS); }
+            continue;
+           }
+         PrintFormat("%s confirmed by %d %s candle(s)", name, confBars[k], high ? "bearish" : "bullish");
+        }
+
+      // entry
       sideDone[k] = true;                                       // one attempt per side per day
       bool   buy  = !high;
       double px   = buy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double sl   = Norm(buy ? swExt[k] - SWEEP_BUF : swExt[k] + SWEEP_BUF);
       double dist = MathAbs(px - sl);
       double tp   = Norm(buy ? px + dist * InpRR : px - dist * InpRR);
-      if(dist > InpSL_USD) { PrintFormat("%s reclaimed but SL $%.2f > max $%g - skipped", high ? "PDH" : "PDL", dist, InpSL_USD); continue; }
+      if(buy ? px <= sl : px >= sl) { PrintFormat("%s: price already beyond the SL - skipped", name); continue; }
+      if(dist > InpSL_USD) { PrintFormat("%s: SL $%.2f > max $%g - skipped", name, dist, InpSL_USD); continue; }
       double lot = Lot(buy, px, sl);
       if(lot <= 0) continue;
       if(buy) trade.Buy(lot, _Symbol, 0, sl, tp, "PDL_SWEEP_BUY");
