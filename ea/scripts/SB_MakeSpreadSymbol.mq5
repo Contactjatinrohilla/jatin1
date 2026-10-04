@@ -19,7 +19,7 @@
 //|  added to Market Watch, e.g. XAUUSD.T_S25.                        |
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Simple Breakout - spread copy"
-#property version   "1.10"
+#property version   "1.11"
 #property script_show_inputs
 
 enum ENUM_SPREAD_MODE
@@ -40,6 +40,11 @@ input bool             InpResume    = true;            // Symbol already exists:
 void OnStart()
   {
    string src = _Symbol;
+   if(StringFind(SymbolInfoString(src, SYMBOL_PATH), "Custom\\SB") == 0)
+     {
+      Alert(src, " is a copy made by this script. Run it on the ORIGINAL symbol's chart (e.g. XAUUSD.T), not on ", src, ".");
+      return;
+     }
    double pt  = SymbolInfoDouble(src, SYMBOL_POINT);
    if(InpSpreadMin < 0 || InpSpreadMax < InpSpreadMin) { Alert("Spread: need 0 <= min <= max"); return; }
    string suffix = InpSuffix != "" ? InpSuffix :
@@ -97,6 +102,7 @@ void OnStart()
          nt = CopyTicksRange(src, ticks, COPY_TICKS_ALL, from_msc, to_msc);
          if(nt < 0) Sleep(500);
         }
+      if(nt < 0) PrintFormat("%s: no ticks from %s (error %d)", TimeToString(day, TIME_DATE), src, GetLastError());
       if(nt <= 0) { daysEmpty++; continue; }
       int kept = 0;
       for(int i = 0; i < nt; i++)
