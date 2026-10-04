@@ -24,13 +24,12 @@
 //|      The window end moves to 5 minutes before the broker's daily  |
 //|      session close when that is earlier.                          |
 //|                                                                  |
-//|  ALL distances are in POINTS (the symbol's smallest price step,   |
-//|  _Point). On a 2-decimal Nasdaq quote 100 points = 1.00 index     |
-//|  point; on a 1-decimal quote 10 points = 1.0 index point.         |
+//|  ALL distances are in INDEX POINTS (price units): SL 50 = a       |
+//|  50-point Nasdaq move, on any broker (2 or 1 decimals).            |
 //|  ALL times are SERVER time (the time shown in Market Watch).      |
 //+------------------------------------------------------------------+
 #property copyright "NAS PDH PDL Breakout"
-#property version   "1.10"
+#property version   "1.20"
 #property description "Previous-day high/low breakout for Nasdaq 100 CFDs (NAS100 / US100 / USTEC)."
 
 #include <Trade\Trade.mqh>
@@ -68,38 +67,38 @@ input string            InpCashEnd          = "23:00";   // Cash session end, se
 //=== 2. Entry =======================================================
 input group "=== 2. Entry ==="
 input string            InpWindow             = "00:00-23:55"; // Trading window, server time (default = whole day; ends 5 min before the session close)
-input int               InpEntryBufferPoints  = 0;      // Entry this many points beyond PDH / PDL
-input int               InpMaxGapPoints       = 0;      // Skip the day if price is this far beyond a level at the window start (0 = off)
-input int               InpMinRangePoints     = 0;      // Skip the day if PDH - PDL is smaller than this (0 = off)
-input int               InpMaxRangePoints     = 0;      // Skip the day if PDH - PDL is larger than this (0 = off)
+input double            InpEntryBuffer       = 0.0;   // Entry this many index points beyond PDH / PDL
+input double            InpMaxGap            = 0.0;   // Skip the day if price is this many index points beyond a level at the window start (0 = off)
+input double            InpMinRange          = 0.0;   // Skip the day if PDH - PDL is smaller than this many index points (0 = off)
+input double            InpMaxRange          = 0.0;   // Skip the day if PDH - PDL is larger than this many index points (0 = off)
 input int               InpOrderExpiryMinutes = 0;      // Delete unfilled orders this many minutes after the window start (0 = off)
 
 //=== 3. Stop loss and take profit ===================================
-input group "=== 3. Stop loss / take profit (points) ==="
+input group "=== 3. Stop loss / take profit (index points) ==="
 input ENUM_SL_MODE      InpSLMode      = SL_FIXED;      // How the stop loss is set
-input int               InpSLPoints    = 5000;          // SL_FIXED: stop loss distance in points
-input int               InpMaxSLPoints = 15000;         // SL_OPPOSITE_LEVEL: maximum stop loss in points (0 = no cap)
+input double            InpSL                = 50.0;   // SL_FIXED: stop loss distance in index points
+input double            InpMaxSL             = 150.0;   // SL_OPPOSITE_LEVEL: maximum stop loss in index points (0 = no cap)
 input double            InpSLRangePct  = 50.0;          // SL_RANGE_PERCENT: stop loss = this % of (PDH - PDL)
 input double            InpRR          = 2.0;           // Take profit = stop loss distance x this
 input bool              InpUseTP       = true;          // Use a take profit (false = exit by trailing stop / window end)
 
 //=== 4. Trade management ============================================
-input group "=== 4. Trade management (points) ==="
+input group "=== 4. Trade management (index points) ==="
 input bool              InpUseBE             = false;   // Breakeven on/off
-input int               InpBE_TriggerPoints  = 3000;    // Breakeven: when the trade is this many points in profit...
-input int               InpBE_LockPoints     = 200;     // ...move the SL to entry + this many points (not above the trigger)
+input double            InpBE_Trigger        = 50.0;   // Breakeven: when the trade is this many index points in profit...
+input double            InpBE_Lock           = 2.0;   // ...move the SL to entry + this many index points (not above the trigger)
 input ENUM_TRAIL_MODE   InpTrailMode         = TRAIL_OFF; // Trailing stop type
-input int               InpTrailStartPoints  = 5000;    // Trailing starts when the trade is this many points in profit
-input int               InpTrailDistPoints   = 3000;    // CONTINUOUS: SL stays this many points behind price
-input int               InpStepPoints        = 2000;    // STEPPED: every this many points of profit...
-input int               InpLockPoints        = 1000;    // ...the SL locks this many more points (steps x lock)
-input int               InpMinModifyPoints   = 100;     // Only move the SL when it changes by at least this many points
+input double            InpTrailStart        = 50.0;   // Trailing starts when the trade is this many index points in profit
+input double            InpTrailDist         = 40.0;   // CONTINUOUS: SL stays this many index points behind price
+input double            InpStep              = 25.0;   // STEPPED: every this many index points of profit...
+input double            InpLock              = 20.0;   // ...the SL locks this many more index points (steps x lock, keep below the step)
+input double            InpMinModify         = 1.0;   // Only move the SL when it changes by at least this many index points
 input string            InpFridayClose       = "22:00"; // Friday: close everything at this server time
 
 //=== 5. Risk and filters ============================================
 input group "=== 5. Risk and filters ==="
 input double            InpRiskPct         = 0.5;       // Risk per trade, % of balance
-input int               InpMaxSpreadPoints = 0;         // Do not place orders while the spread is above this (0 = off)
+input double            InpMaxSpread         = 0.0;   // Do not place orders while the spread is above this many index points (0 = off)
 input bool              InpTradeMon        = true;      // Trade on Monday
 input bool              InpTradeTue        = true;      // Trade on Tuesday
 input bool              InpTradeWed        = true;      // Trade on Wednesday
@@ -170,7 +169,8 @@ double NormPrice(const double price)
    return NormalizeDouble(MathRound(price / tick) * tick, _Digits);
   }
 
-double SpreadPoints() { return (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point; }
+// Current spread in index points (price units).
+double SpreadPoints() { return SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID); }
 
 // Broker minimum distance between price and SL/TP (stops level / freeze level), in price.
 double MinStopDistance()
@@ -366,8 +366,8 @@ void NewDay(const datetime today)
    if(CountPendings() > 0 || g_tradedToday) g_ordersDone = true;
 
    if(!g_levelsOk) { g_status = "no levels today"; return; }
-   double rangePts = (g_pdh - g_pdl) / _Point;
-   PrintFormat("=== %s | levels from %s (%s) | PDH %.*f  PDL %.*f  range %.0f points",
+   double rangePts = g_pdh - g_pdl;
+   PrintFormat("=== %s | levels from %s (%s) | PDH %.*f  PDL %.*f  range %.2f index points",
                TimeToString(today, TIME_DATE), g_levelDay, EnumToString(InpLevelSource),
                _Digits, g_pdh, _Digits, g_pdl, rangePts);
    DrawLevel("NAS_PDH", g_pdh, clrDodgerBlue, "PDH " + DoubleToString(g_pdh, _Digits));
@@ -386,13 +386,13 @@ double StopDistance(const bool buy, const double entry)
       case SL_OPPOSITE_LEVEL:
         {
          double dist = buy ? entry - g_pdl : g_pdh - entry;
-         if(InpMaxSLPoints > 0) dist = MathMin(dist, InpMaxSLPoints * _Point);
+         if(InpMaxSL > 0) dist = MathMin(dist, InpMaxSL);
          return dist;
         }
       case SL_RANGE_PERCENT:
          return (g_pdh - g_pdl) * InpSLRangePct / 100.0;
       default:
-         return InpSLPoints * _Point;
+         return InpSL;
      }
   }
 
@@ -432,7 +432,7 @@ bool PlaceStop(const bool buy, const double entry)
    double dist = StopDistance(buy, entry);
    if(dist <= MinStopDistance())
      {
-      PrintFormat("%s skipped: stop loss distance %.0f points is too small", side, dist / _Point);
+      PrintFormat("%s skipped: stop loss distance %.2f index points is too small", side, dist);
       return false;
      }
    double sl  = NormPrice(buy ? entry - dist : entry + dist);
@@ -445,7 +445,7 @@ bool PlaceStop(const bool buy, const double entry)
    uint rc = g_trade.ResultRetcode();
    if(ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED))
      {
-      PrintFormat("%s %.2f lots @ %.*f  SL %.*f (%.0f pts)  TP %s", side, lot, _Digits, entry, _Digits, sl, dist / _Point,
+      PrintFormat("%s %.2f lots @ %.*f  SL %.*f (%.2f index pts)  TP %s", side, lot, _Digits, entry, _Digits, sl, dist,
                   InpUseTP ? DoubleToString(tp, _Digits) : "none");
       return true;
      }
@@ -465,36 +465,36 @@ void TryPlaceOrders()
       Print("No orders today: weekday switched off");
       return;
      }
-   if(InpMaxSpreadPoints > 0 && SpreadPoints() > InpMaxSpreadPoints)
+   if(InpMaxSpread > 0 && SpreadPoints() > InpMaxSpread)
      {
       g_status = "waiting: spread too wide";
-      if(!g_spreadLogged) { PrintFormat("Waiting: spread %.0f > max %d points", SpreadPoints(), InpMaxSpreadPoints); g_spreadLogged = true; }
+      if(!g_spreadLogged) { PrintFormat("Waiting: spread %.2f > max %g index points", SpreadPoints(), InpMaxSpread); g_spreadLogged = true; }
       return;   // try again on the next tick
      }
    g_ordersDone = true;   // from here on the decision for today is final
 
-   double rangePts = (g_pdh - g_pdl) / _Point;
-   if(InpMinRangePoints > 0 && rangePts < InpMinRangePoints)
-     { g_status = "skipped: range too small"; PrintFormat("No orders today: range %.0f < min %d points", rangePts, InpMinRangePoints); return; }
-   if(InpMaxRangePoints > 0 && rangePts > InpMaxRangePoints)
-     { g_status = "skipped: range too large"; PrintFormat("No orders today: range %.0f > max %d points", rangePts, InpMaxRangePoints); return; }
+   double rangePts = g_pdh - g_pdl;
+   if(InpMinRange > 0 && rangePts < InpMinRange)
+     { g_status = "skipped: range too small"; PrintFormat("No orders today: range %.2f < min %g index points", rangePts, InpMinRange); return; }
+   if(InpMaxRange > 0 && rangePts > InpMaxRange)
+     { g_status = "skipped: range too large"; PrintFormat("No orders today: range %.2f > max %g index points", rangePts, InpMaxRange); return; }
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   if(InpMaxGapPoints > 0)
+   if(InpMaxGap > 0)
      {
-      double above = (bid - g_pdh) / _Point, below = (g_pdl - bid) / _Point;
-      if(above > InpMaxGapPoints || below > InpMaxGapPoints)
+      double above = bid - g_pdh, below = g_pdl - bid;
+      if(above > InpMaxGap || below > InpMaxGap)
         {
          g_status = "skipped: gap";
-         PrintFormat("No orders today: price %.*f is %.0f points beyond a level (max %d)", _Digits, bid, MathMax(above, below), InpMaxGapPoints);
+         PrintFormat("No orders today: price %.*f is %.2f index points beyond a level (max %g)", _Digits, bid, MathMax(above, below), InpMaxGap);
          return;
         }
      }
 
    double minDist = MinStopDistance();
-   double buyAt   = NormPrice(g_pdh + InpEntryBufferPoints * _Point);
-   double sellAt  = NormPrice(g_pdl - InpEntryBufferPoints * _Point);
+   double buyAt   = NormPrice(g_pdh + InpEntryBuffer);
+   double sellAt  = NormPrice(g_pdl - InpEntryBuffer);
    int    placed  = 0;
 
    if(ask >= buyAt)               PrintFormat("BUY side skipped: price %.*f is already above %.*f", _Digits, ask, _Digits, buyAt);
@@ -529,26 +529,26 @@ void ManagePositions()
       double sl        = PositionGetDouble(POSITION_SL);
       double tp        = PositionGetDouble(POSITION_TP);
       double price     = buy ? bid : ask;                       // price the trade would close at
-      double profitPts = (buy ? bid - open : open - ask) / _Point;
+      double profitPts = buy ? bid - open : open - ask;      // index points
       double target    = sl;
       string why       = "";
 
       // 1) breakeven
-      if(InpUseBE && profitPts >= InpBE_TriggerPoints)
+      if(InpUseBE && profitPts >= InpBE_Trigger)
         {
-         double be = buy ? open + InpBE_LockPoints * _Point : open - InpBE_LockPoints * _Point;
+         double be = buy ? open + InpBE_Lock : open - InpBE_Lock;
          if(sl == 0.0 || (buy ? be > target : be < target)) { target = be; why = "breakeven"; }
         }
       // 2) trailing
-      if(InpTrailMode != TRAIL_OFF && profitPts >= InpTrailStartPoints)
+      if(InpTrailMode != TRAIL_OFF && profitPts >= InpTrailStart)
         {
          double tr;
          if(InpTrailMode == TRAIL_CONTINUOUS)
-            tr = buy ? bid - InpTrailDistPoints * _Point : ask + InpTrailDistPoints * _Point;
+            tr = buy ? bid - InpTrailDist : ask + InpTrailDist;
          else
            {
-            double steps = MathFloor(profitPts / InpStepPoints);
-            tr = buy ? open + steps * InpLockPoints * _Point : open - steps * InpLockPoints * _Point;
+            double steps = MathFloor(profitPts / InpStep);
+            tr = buy ? open + steps * InpLock : open - steps * InpLock;
            }
          if((sl == 0.0 && why == "") || (buy ? tr > target : tr < target)) { target = tr; why = "trailing"; }
         }
@@ -561,12 +561,12 @@ void ManagePositions()
 
       // only in the trade's favour, and only if the change is big enough
       if(sl != 0.0 && (buy ? target <= sl : target >= sl)) continue;
-      if(sl != 0.0 && MathAbs(target - sl) < InpMinModifyPoints * _Point) continue;
+      if(sl != 0.0 && MathAbs(target - sl) < InpMinModify) continue;
       // inside the freeze level the broker does not allow any change
       if(freeze > 0.0 && sl != 0.0 && MathAbs(price - sl) <= freeze) continue;
 
       if(g_trade.PositionModify(ticket, target, tp))
-         PrintFormat("SL %s: %.*f -> %.*f (profit %.0f points)", why, _Digits, sl, _Digits, target, profitPts);
+         PrintFormat("SL %s: %.*f -> %.*f (profit %.2f index points)", why, _Digits, sl, _Digits, target, profitPts);
       else
          PrintFormat("SL %s to %.*f REJECTED: %s", why, _Digits, target, g_trade.ResultRetcodeDescription());
      }
@@ -584,11 +584,11 @@ void UpdateComment()
    string txt = StringFormat("NAS PDH/PDL Breakout  (%s)\n", _Symbol);
    txt += StringFormat("Level source: %s  [%s]\n", InpLevelSource == LEVEL_D1 ? "previous daily candle" : "previous cash session", g_levelDay);
    if(g_levelsOk)
-      txt += StringFormat("PDH %.*f   PDL %.*f   range %.0f points\n", _Digits, g_pdh, _Digits, g_pdl, (g_pdh - g_pdl) / _Point);
+      txt += StringFormat("PDH %.*f   PDL %.*f   range %.2f index points\n", _Digits, g_pdh, _Digits, g_pdl, g_pdh - g_pdl);
    else
       txt += "PDH / PDL: not available today\n";
    txt += StringFormat("Window %s | status: %s | pending %d | open %d\n", InpWindow, g_status, CountPendings(), CountPositions());
-   txt += StringFormat("Spread %.0f points", SpreadPoints());
+   txt += StringFormat("Spread %.2f index points", SpreadPoints());
    Comment(txt);
   }
 
@@ -615,17 +615,17 @@ int OnInit()
    if(g_friClose < 0)                                   return Fail("FridayClose must be HH:MM");
    if(InpRiskPct <= 0.0 || InpRiskPct > 10.0)          return Fail("RiskPct must be > 0 and <= 10");
    if(InpRR <= 0.0)                                     return Fail("RR must be > 0");
-   if(InpSLMode == SL_FIXED && InpSLPoints <= 0)        return Fail("SLPoints must be > 0");
+   if(InpSLMode == SL_FIXED && InpSL <= 0)        return Fail("SL must be > 0");
    if(InpSLMode == SL_RANGE_PERCENT && InpSLRangePct <= 0.0) return Fail("SLRangePct must be > 0");
-   if(InpMaxSLPoints < 0 || InpEntryBufferPoints < 0 || InpMaxGapPoints < 0 || InpMinRangePoints < 0 ||
-      InpMaxRangePoints < 0 || InpOrderExpiryMinutes < 0 || InpMaxSpreadPoints < 0 || InpMinModifyPoints < 0)
+   if(InpMaxSL < 0 || InpEntryBuffer < 0 || InpMaxGap < 0 || InpMinRange < 0 ||
+      InpMaxRange < 0 || InpOrderExpiryMinutes < 0 || InpMaxSpread < 0 || InpMinModify < 0)
       return Fail("point and minute inputs must be >= 0");
-   if(InpMaxRangePoints > 0 && InpMaxRangePoints <= InpMinRangePoints) return Fail("MaxRange must be above MinRange");
-   if(InpUseBE && (InpBE_TriggerPoints <= 0 || InpBE_LockPoints < 0 || InpBE_LockPoints > InpBE_TriggerPoints))
+   if(InpMaxRange > 0 && InpMaxRange <= InpMinRange) return Fail("MaxRange must be above MinRange");
+   if(InpUseBE && (InpBE_Trigger <= 0 || InpBE_Lock < 0 || InpBE_Lock > InpBE_Trigger))
       return Fail("Breakeven: trigger > 0 and lock between 0 and the trigger");
-   if(InpTrailMode == TRAIL_CONTINUOUS && (InpTrailStartPoints < 0 || InpTrailDistPoints <= 0))
+   if(InpTrailMode == TRAIL_CONTINUOUS && (InpTrailStart < 0 || InpTrailDist <= 0))
       return Fail("Continuous trailing: start >= 0 and distance > 0");
-   if(InpTrailMode == TRAIL_STEPPED && (InpTrailStartPoints < 0 || InpStepPoints <= 0 || InpLockPoints <= 0))
+   if(InpTrailMode == TRAIL_STEPPED && (InpTrailStart < 0 || InpStep <= 0 || InpLock <= 0))
       return Fail("Stepped trailing: start >= 0, step > 0 and lock > 0");
    if(InpMinDailyBarHours < 0 || InpMinDailyBarHours > 24) return Fail("MinDailyBarHours must be 0-24");
 
@@ -722,16 +722,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                    |
 //+------------------------------------------------------------------+
-// Sets the optimisation range of an integer input (keeps its tick box as it is).
-void RangeL(const string name, const long start, const long step, const long stop)
-  {
-   bool enable = false;
-   long value = 0, s1 = 0, s2 = 0, s3 = 0;
-   if(ParameterGetRange(name, enable, value, s1, s2, s3))
-      if(!ParameterSetRange(name, enable, value, start, step, stop)) PrintFormat("Could not set the range of %s", name);
-  }
-
-// Same for a decimal input.
+// Sets the optimisation range of an input (keeps its tick box as it is).
 void RangeD(const string name, const double start, const double step, const double stop)
   {
    bool enable = false;
@@ -742,17 +733,17 @@ void RangeD(const string name, const double start, const double step, const doub
 
 int OnTesterInit()
   {
-   RangeL("InpSLPoints",          1000, 500, 20000);
-   RangeL("InpMaxSLPoints",       1000, 500, 20000);
-   RangeD("InpRR",                1.0, 0.5, 6.0);
-   RangeL("InpEntryBufferPoints", 0,    100, 2000);
-   RangeL("InpBE_TriggerPoints",  500,  500, 20000);
-   RangeL("InpBE_LockPoints",     500,  500, 20000);
-   RangeL("InpTrailStartPoints",  500,  500, 20000);
-   RangeL("InpTrailDistPoints",   500,  500, 20000);
-   RangeL("InpStepPoints",        500,  500, 20000);
-   RangeL("InpLockPoints",        500,  500, 20000);
-   Print("Optimisation ranges set: SL 1000-20000/500, RR 1-6/0.5, buffer 0-2000/100, BE/trail 500-20000/500");
+   RangeD("InpSL",          10.0, 5.0, 200.0);
+   RangeD("InpMaxSL",       10.0, 5.0, 200.0);
+   RangeD("InpRR",          1.0,  0.5, 6.0);
+   RangeD("InpEntryBuffer", 0.0,  1.0, 20.0);
+   RangeD("InpBE_Trigger",  5.0,  5.0, 200.0);
+   RangeD("InpBE_Lock",     5.0,  5.0, 200.0);
+   RangeD("InpTrailStart",  5.0,  5.0, 200.0);
+   RangeD("InpTrailDist",   5.0,  5.0, 200.0);
+   RangeD("InpStep",        5.0,  5.0, 200.0);
+   RangeD("InpLock",        5.0,  5.0, 200.0);
+   Print("Optimisation ranges set (index points): SL 10-200/5, RR 1-6/0.5, buffer 0-20/1, BE/trail 5-200/5");
    return INIT_SUCCEEDED;
   }
 
