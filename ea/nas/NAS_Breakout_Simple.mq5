@@ -2,20 +2,21 @@
 //|                                        NAS_Breakout_Simple.mq5    |
 //|                                                                  |
 //|  Nasdaq 100 CFD (NAS100 / US100 / USTEC / NDX100) breakouts.      |
-//|  Two simple setups, one trade at a time:                          |
+//|  Two simple setups, both traded independently:                    |
 //|                                                                  |
 //|  1. PDH / PDL  - once a day: BUY STOP at yesterday's high,        |
 //|                  SELL STOP at yesterday's low.                    |
-//|  2. 4H STRADDLE - every new 4-hour candle: BUY STOP at the high   |
-//|                  and SELL STOP at the low of the candle that just |
-//|                  closed. Unfilled 4H orders are replaced by the   |
-//|                  next candle's orders.                            |
+//|  2. 4H STRADDLE - as soon as a new 4-hour candle opens: BUY STOP  |
+//|                  at the high and SELL STOP at the low of the      |
+//|                  candle that just closed.                         |
 //|                                                                  |
-//|  When any order fills, every other order is deleted (one trade    |
-//|  at a time). Stop loss and take profit go on the order; optional  |
+//|  NO order is cancelled when another one fills: both sides of      |
+//|  every level stay active, PDH and 4H trades can run at the same   |
+//|  time. Stop loss and take profit go on the order; optional        |
 //|  breakeven and trailing stop protect the profit. Everything is    |
 //|  closed at the window end and 5 minutes before the broker's daily |
-//|  close - nothing is held overnight or over the weekend.           |
+//|  close - nothing is held overnight or over the weekend (that is   |
+//|  the only time unfilled orders are deleted).                      |
 //|                                                                  |
 //|  Built in (no inputs needed): short Sunday daily candles are      |
 //|  skipped, broken history (impossible levels) is skipped, lot size |
@@ -25,15 +26,14 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.10"
-#property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. 13 inputs, one trade at a time."
+#property version   "1.20"
+#property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. 12 inputs, every level traded."
 
 #include <Trade\Trade.mqh>
 
 input group "=== Setups ==="
 input bool   InpUsePDH     = true;           // Trade the previous-day high / low breakout
 input bool   InpUseH4      = true;           // Trade the 4H candle straddle
-input int    InpH4DelayMin = 30;             // 4H: place the orders this many minutes after the candle opens
 input string InpWindow     = "00:00-23:55";  // Trading window, server time HH:MM-HH:MM
 
 input group "=== Exit (index points) ==="
@@ -46,7 +46,7 @@ input double InpTrailDist  = 40.0;           // Trailing: SL stays this many poi
 
 input group "=== Risk ==="
 input double InpRiskPct    = 0.5;            // Risk per trade, % of balance
-input int    InpMaxTrades  = 2;              // Maximum trades per day (both setups together)
+input int    InpMaxTrades  = 0;              // Maximum trades per day, both setups together (0 = no limit; when reached, remaining orders are deleted)
 input ulong  InpMagic      = 930001;         // Magic number (PDH = this, 4H = this + 1)
 
 //--- fixed rules (kept out of the inputs on purpose)
@@ -59,7 +59,7 @@ CTrade   trade;
 int      g_winStart = 0, g_winEnd = 0, g_dayEnd = 0;
 datetime g_day = 0, g_h4 = 0;
 double   g_pdh = 0, g_pdl = 0;
-bool     g_pdhOk = false, g_pdhDone = false, g_h4Done = true;
+bool     g_pdhOk = false, g_pdhDone = false;
 int      g_tradesToday = 0;
 string   g_status = "";
 
@@ -299,13 +299,13 @@ int OnInit()
    else if(InpBE < 0.0 || InpTrailStart < 0.0)        err = "breakeven / trailing start must be >= 0";
    else if(InpTrailStart > 0.0 && InpTrailDist <= 0.0) err = "trailing distance must be > 0";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)     err = "risk must be > 0 and <= 5";
-   else if(InpMaxTrades < 1 || InpH4DelayMin < 0 || InpH4DelayMin >= 240) err = "max trades >= 1, 4H delay 0-239 minutes";
+   else if(InpMaxTrades < 0)                          err = "max trades must be >= 0 (0 = no limit)";
    if(err != "") { Print("INVALID INPUT: ", err); return INIT_PARAMETERS_INCORRECT; }
 
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(200);
-   PrintFormat("NAS Breakout Simple on %s | PDH %s | 4H %s (+%d min) | window %s | SL %g %s | BE %g | trail %g/%g | risk %.2f%% | max %d trades/day | broker min distance %.2f",
-               _Symbol, InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off", InpH4DelayMin, InpWindow, InpSL,
+   PrintFormat("NAS Breakout Simple on %s | PDH %s | 4H %s | window %s | SL %g %s | BE %g | trail %g/%g | risk %.2f%% | max trades/day %d (0 = no limit) | broker min distance %.2f",
+               _Symbol, InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off", InpWindow, InpSL,
                InpTP > 0.0 ? StringFormat("TP %g (fixed)", InpTP) : InpRR > 0.0 ? StringFormat("TP = %g x SL", InpRR) : "no TP", InpBE,
                InpTrailStart, InpTrailDist, InpRiskPct, InpMaxTrades, BrokerMinDist());
    return INIT_SUCCEEDED;
@@ -329,7 +329,12 @@ void OnTick()
       if(mins >= g_dayEnd && CountPositions() > 0) CloseAll("window end");
       g_status = "outside the window";
      }
-   else if(CountPositions() == 0 && g_tradesToday < InpMaxTrades)
+   else if(InpMaxTrades > 0 && g_tradesToday >= InpMaxTrades)
+     {
+      DeleteOrders(0, "max trades for today reached");
+      g_status = "max trades for today reached";
+     }
+   else
      {
       // 1) PDH / PDL - once a day
       if(InpUsePDH && !g_pdhDone && g_pdhOk)
@@ -337,17 +342,11 @@ void OnTick()
          g_pdhDone = true;
          Straddle(g_pdh, g_pdl, InpMagic, "PDH");
         }
-      // 2) 4H straddle - each new 4H candle, after the delay
+      // 2) 4H straddle - as soon as each new 4H candle opens
       datetime h4 = iTime(_Symbol, PERIOD_H4, 0);
       if(InpUseH4 && h4 > 0 && h4 != g_h4)
         {
          g_h4 = h4;
-         g_h4Done = false;
-         DeleteOrders(InpMagic + 1, "new 4H candle");
-        }
-      if(InpUseH4 && !g_h4Done && now >= g_h4 + InpH4DelayMin * 60)
-        {
-         g_h4Done = true;
          double hi = iHigh(_Symbol, PERIOD_H4, 1), lo = iLow(_Symbol, PERIOD_H4, 1);
          if(hi > 0.0 && lo > 0.0)
            {
@@ -356,17 +355,15 @@ void OnTick()
             Straddle(hi, lo, InpMagic + 1, "H4");
            }
         }
-      g_status = "waiting for a breakout";
+      g_status = StringFormat("%d open, waiting for breakouts", CountPositions());
      }
-   else if(CountPositions() > 0) g_status = "in a trade";
-   else                          g_status = "max trades for today reached";
 
    if(!MQLInfoInteger(MQL_OPTIMIZATION))
-      Comment(StringFormat("NAS Breakout Simple | %s\nPDH %.*f  PDL %.*f | trades today %d/%d | %s",
-                           _Symbol, _Digits, g_pdh, _Digits, g_pdl, g_tradesToday, InpMaxTrades, g_status));
+      Comment(StringFormat("NAS Breakout Simple | %s\nPDH %.*f  PDL %.*f | trades today %d | %s",
+                           _Symbol, _Digits, g_pdh, _Digits, g_pdl, g_tradesToday, g_status));
   }
 
-// One trade at a time: a fill deletes every other order.
+// Fills and closes are only logged - no order is cancelled when another one fills.
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
   {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || !HistoryDealSelect(trans.deal)) return;
@@ -378,7 +375,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       g_tradesToday++;
       PrintFormat("[%s] FILLED %s @ %.*f (trade %d today)", tag, HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY ? "BUY" : "SELL",
                   _Digits, HistoryDealGetDouble(trans.deal, DEAL_PRICE), g_tradesToday);
-      DeleteOrders(0, "one trade at a time");
      }
    else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
      {
@@ -400,14 +396,6 @@ void Range(const string name, const double start, const double step, const doubl
       PrintFormat("Could not set the range of %s", name);
   }
 
-void RangeL(const string name, const long start, const long step, const long stop)
-  {
-   bool on = false;
-   long v = 0, a = 0, b = 0, c = 0;
-   if(ParameterGetRange(name, on, v, a, b, c) && !ParameterSetRange(name, on, v, start, step, stop))
-      PrintFormat("Could not set the range of %s", name);
-  }
-
 int OnTesterInit()
   {
    Range("InpSL",         10.0, 5.0, 200.0);
@@ -416,7 +404,6 @@ int OnTesterInit()
    Range("InpBE",         0.0,  10.0, 200.0);
    Range("InpTrailStart", 0.0,  10.0, 200.0);
    Range("InpTrailDist",  10.0, 10.0, 150.0);
-   RangeL("InpH4DelayMin", 0, 15, 120);
    return INIT_SUCCEEDED;
   }
 
