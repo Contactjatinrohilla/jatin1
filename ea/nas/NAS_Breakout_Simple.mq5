@@ -26,7 +26,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.20"
+#property version   "1.21"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. 12 inputs, every level traded."
 
 #include <Trade\Trade.mqh>
@@ -388,6 +388,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                    |
 //+------------------------------------------------------------------+
+// Ranges used when a box is ticked - MetaTrader's Start/Step/Stop columns are ignored.
+// SL, TP, breakeven, trail start and trail distance: start 1, step 2. Or load NAS_Breakout_Simple_from_1_step_2.set.
 void Range(const string name, const double start, const double step, const double stop)
   {
    bool on = false;
@@ -398,12 +400,13 @@ void Range(const string name, const double start, const double step, const doubl
 
 int OnTesterInit()
   {
-   Range("InpSL",         10.0, 5.0, 200.0);
-   Range("InpTP",         0.0,  10.0, 400.0);
-   Range("InpRR",         0.0,  0.5, 5.0);
-   Range("InpBE",         0.0,  10.0, 200.0);
-   Range("InpTrailStart", 0.0,  10.0, 200.0);
-   Range("InpTrailDist",  10.0, 10.0, 150.0);
+   Range("InpSL",         1.0, 2.0, 199.0);
+   Range("InpTP",         1.0, 2.0, 399.0);
+   Range("InpRR",         0.0, 0.5, 5.0);
+   Range("InpBE",         1.0, 2.0, 199.0);
+   Range("InpTrailStart", 1.0, 2.0, 199.0);
+   Range("InpTrailDist",  1.0, 2.0, 149.0);
+   Print("Optimisation ranges: SL / TP / BE / trail start / trail distance start 1, step 2 (RR 0..5 step 0.5)");
    return INIT_SUCCEEDED;
   }
 
