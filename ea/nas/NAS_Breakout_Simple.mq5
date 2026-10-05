@@ -39,7 +39,7 @@ input string InpWindow     = "00:00-23:55";  // Trading window, server time HH:M
 input group "=== Exit (index points) ==="
 input double InpSL         = 50.0;           // Stop loss
 input bool   InpUseTP      = false;          // Use fixed take profit (false = TP = SL x RR)
-input double InpFixedTP    = 100.0;           // Fixed take profit in points
+input double InpFixedTP    = 100.0;          // Fixed take profit in points
 input double InpRR         = 2.0;            // Take profit = SL x this when fixed TP is off (0 = no take profit)
 input bool   InpUseBE      = false;          // Use breakeven
 input double InpBEPoints   = 30.0;           // Breakeven: move SL to entry +1 at this many points profit
