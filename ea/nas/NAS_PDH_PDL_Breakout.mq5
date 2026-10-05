@@ -29,7 +29,7 @@
 //|  ALL times are SERVER time (the time shown in Market Watch).      |
 //+------------------------------------------------------------------+
 #property copyright "NAS PDH PDL Breakout"
-#property version   "1.22"
+#property version   "1.23"
 #property description "Previous-day high/low breakout for Nasdaq 100 CFDs (NAS100 / US100 / USTEC)."
 
 #include <Trade\Trade.mqh>
@@ -122,6 +122,7 @@ bool     g_tradedToday = false;              // a trade was opened today
 bool     g_spreadLogged = false;             // "spread too wide" printed today
 string   g_status = "";                      // text for the chart comment
 datetime g_lastComment = 0;
+datetime g_lastSkipLog = 0;                  // SL-move "skipped" messages at most once a minute
 
 //+------------------------------------------------------------------+
 //|  Small helpers                                                    |
@@ -593,10 +594,22 @@ void ManagePositions()
       target = NormPrice(target);
 
       // only in the trade's favour, and only if the change is big enough
-      if(sl != 0.0 && (buy ? target <= sl : target >= sl)) continue;
-      if(sl != 0.0 && MathAbs(target - sl) < InpMinModify) continue;
-      // inside the freeze level the broker does not allow any change
-      if(freeze > 0.0 && sl != 0.0 && MathAbs(price - sl) <= freeze) continue;
+      string skip = "";
+      if(sl != 0.0 && (buy ? target <= sl : target >= sl))
+         skip = StringFormat("broker minimum distance %.2f keeps the new SL from improving", minD);
+      else if(sl != 0.0 && MathAbs(target - sl) < InpMinModify)
+         skip = "";                                           // normal: change smaller than MinModify
+      else if(freeze > 0.0 && sl != 0.0 && MathAbs(price - sl) <= freeze)
+         skip = StringFormat("price is within the broker freeze level (%.2f) of the current SL", freeze);
+      if(skip != "" || (sl != 0.0 && MathAbs(target - sl) < InpMinModify) || (sl != 0.0 && (buy ? target <= sl : target >= sl)))
+        {
+         if(skip != "" && TimeCurrent() - g_lastSkipLog >= 60)
+           {
+            g_lastSkipLog = TimeCurrent();
+            PrintFormat("SL %s to %.*f skipped (profit %.2f): %s", why, _Digits, target, profitPts, skip);
+           }
+         continue;
+        }
 
       if(g_trade.PositionModify(ticket, target, tp))
          PrintFormat("SL %s: %.*f -> %.*f (profit %.2f index points)", why, _Digits, sl, _Digits, target, profitPts);
@@ -662,6 +675,13 @@ int OnInit()
       return Fail("Stepped trailing: start >= 0, step > 0 and lock > 0");
    if(InpMinDailyBarHours < 0 || InpMinDailyBarHours > 24) return Fail("MinDailyBarHours must be 0-24");
    if(InpMaxRangePct <= 0.0) return Fail("MaxRangePct must be > 0");
+
+   double brokerMin = MinStopDistance();
+   if(InpTrailMode == TRAIL_CONTINUOUS && InpTrailDist <= brokerMin)
+      PrintFormat("WARNING: trail distance %g is not above the broker's stop/freeze distance %.2f - the SL cannot follow price",
+                  InpTrailDist, brokerMin);
+   PrintFormat("Broker levels on %s: stops level %I64d points, freeze level %I64d points (= %.2f index points minimum SL distance)",
+               _Symbol, SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL), brokerMin);
 
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
