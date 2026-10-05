@@ -25,8 +25,8 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.00"
-#property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. 12 inputs, one trade at a time."
+#property version   "1.10"
+#property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. 13 inputs, one trade at a time."
 
 #include <Trade\Trade.mqh>
 
@@ -38,7 +38,8 @@ input string InpWindow     = "00:00-23:55";  // Trading window, server time HH:M
 
 input group "=== Exit (index points) ==="
 input double InpSL         = 50.0;           // Stop loss
-input double InpRR         = 2.0;            // Take profit = SL x this (0 = no take profit, exit by trailing / window end)
+input double InpTP         = 0.0;            // Fixed take profit in points (0 = use RR below)
+input double InpRR         = 2.0;            // Take profit = SL x this when TP is 0 (both 0 = no take profit, exit by trailing / window end)
 input double InpBE         = 0.0;            // Move SL to entry +1 when the trade is this many points in profit (0 = off)
 input double InpTrailStart = 0.0;            // Start trailing when the trade is this many points in profit (0 = off)
 input double InpTrailDist  = 40.0;           // Trailing: SL stays this many points behind price
@@ -192,7 +193,8 @@ void PlaceStop(const bool buy, const double entry, const ulong magic, const stri
      }
    if(InpSL <= gap) { PrintFormat("[%s] SL %g is inside the broker minimum %.2f", tag, InpSL, gap); return; }
    double sl  = Norm(buy ? entry - InpSL : entry + InpSL);
-   double tp  = (InpRR > 0.0) ? Norm(buy ? entry + InpSL * InpRR : entry - InpSL * InpRR) : 0.0;
+   double tpDist = (InpTP > 0.0) ? InpTP : InpSL * InpRR;      // fixed TP wins over RR
+   double tp  = (tpDist > 0.0) ? Norm(buy ? entry + tpDist : entry - tpDist) : 0.0;
    if(sl <= 0.0 || tp < 0.0) return;
    double lot = LotSize(buy, entry, sl);
    if(lot <= 0.0) return;
@@ -293,7 +295,7 @@ int OnInit()
    string err = "";
    if(g_winStart < 0 || g_winEnd <= g_winStart)       err = "Window must be HH:MM-HH:MM with start before end";
    else if(!InpUsePDH && !InpUseH4)                   err = "switch on at least one setup";
-   else if(InpSL <= 0.0 || InpRR < 0.0)               err = "SL must be > 0 and RR >= 0";
+   else if(InpSL <= 0.0 || InpRR < 0.0 || InpTP < 0.0) err = "SL must be > 0, TP and RR >= 0";
    else if(InpBE < 0.0 || InpTrailStart < 0.0)        err = "breakeven / trailing start must be >= 0";
    else if(InpTrailStart > 0.0 && InpTrailDist <= 0.0) err = "trailing distance must be > 0";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)     err = "risk must be > 0 and <= 5";
@@ -302,8 +304,9 @@ int OnInit()
 
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(200);
-   PrintFormat("NAS Breakout Simple on %s | PDH %s | 4H %s (+%d min) | window %s | SL %g RR %g | BE %g | trail %g/%g | risk %.2f%% | max %d trades/day | broker min distance %.2f",
-               _Symbol, InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off", InpH4DelayMin, InpWindow, InpSL, InpRR, InpBE,
+   PrintFormat("NAS Breakout Simple on %s | PDH %s | 4H %s (+%d min) | window %s | SL %g %s | BE %g | trail %g/%g | risk %.2f%% | max %d trades/day | broker min distance %.2f",
+               _Symbol, InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off", InpH4DelayMin, InpWindow, InpSL,
+               InpTP > 0.0 ? StringFormat("TP %g (fixed)", InpTP) : InpRR > 0.0 ? StringFormat("TP = %g x SL", InpRR) : "no TP", InpBE,
                InpTrailStart, InpTrailDist, InpRiskPct, InpMaxTrades, BrokerMinDist());
    return INIT_SUCCEEDED;
   }
@@ -408,6 +411,7 @@ void RangeL(const string name, const long start, const long step, const long sto
 int OnTesterInit()
   {
    Range("InpSL",         10.0, 5.0, 200.0);
+   Range("InpTP",         0.0,  10.0, 400.0);
    Range("InpRR",         0.0,  0.5, 5.0);
    Range("InpBE",         0.0,  10.0, 200.0);
    Range("InpTrailStart", 0.0,  10.0, 200.0);
