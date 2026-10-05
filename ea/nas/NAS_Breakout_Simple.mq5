@@ -15,11 +15,11 @@
 //|                                                                  |
 //|  NO order is cancelled when another one fills: both sides of a    |
 //|  level stay active, PDH and 4H trades can run at the same time.   |
-//|  Stop loss and take profit go on the order; optional        |
-//|  breakeven and trailing stop protect the profit. Everything is    |
-//|  closed at the window end and 5 minutes before the broker's daily |
-//|  close - nothing is held overnight or over the weekend (that is   |
-//|  unfilled PDH orders are only deleted then).                      |
+//|  Stop loss and take profit go on the order; optional breakeven    |
+//|  and trailing stop protect the profit. Everything is closed at    |
+//|  the window end and 5 minutes before the broker's daily close -   |
+//|  nothing is held overnight or over the weekend (unfilled PDH      |
+//|  orders are only deleted then).                                   |
 //|                                                                  |
 //|  Built in (no inputs needed): short Sunday daily candles are      |
 //|  skipped, broken history (impossible levels) is skipped, lot size |
