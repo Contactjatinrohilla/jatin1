@@ -8,15 +8,18 @@
 //|                  SELL STOP at yesterday's low.                    |
 //|  2. 4H STRADDLE - as soon as a new 4-hour candle opens: BUY STOP  |
 //|                  at the high and SELL STOP at the low of the      |
-//|                  candle that just closed.                         |
+//|                  candle that just closed. When the next 4H candle |
+//|                  opens, the old 4H orders still waiting are       |
+//|                  deleted and the new pair is placed (open trades  |
+//|                  keep running with their SL / TP).                |
 //|                                                                  |
-//|  NO order is cancelled when another one fills: both sides of      |
-//|  every level stay active, PDH and 4H trades can run at the same   |
-//|  time. Stop loss and take profit go on the order; optional        |
+//|  NO order is cancelled when another one fills: both sides of a    |
+//|  level stay active, PDH and 4H trades can run at the same time.   |
+//|  Stop loss and take profit go on the order; optional        |
 //|  breakeven and trailing stop protect the profit. Everything is    |
 //|  closed at the window end and 5 minutes before the broker's daily |
 //|  close - nothing is held overnight or over the weekend (that is   |
-//|  the only time unfilled orders are deleted).                      |
+//|  unfilled PDH orders are only deleted then).                      |
 //|                                                                  |
 //|  Built in (no inputs needed): short Sunday daily candles are      |
 //|  skipped, broken history (impossible levels) is skipped, lot size |
@@ -26,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.23"
+#property version   "1.24"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -348,11 +351,12 @@ void OnTick()
          g_pdhDone = true;
          Straddle(g_pdh, g_pdl, InpMagic, "PDH");
         }
-      // 2) 4H straddle - as soon as each new 4H candle opens
+      // 2) 4H straddle - as soon as each new 4H candle opens: old 4H orders out, new pair in
       datetime h4 = iTime(_Symbol, PERIOD_H4, 0);
       if(InpUseH4 && h4 > 0 && h4 != g_h4)
         {
          g_h4 = h4;
+         DeleteOrders(InpMagic + 1, "new 4H candle - old 4H order replaced");
          double hi = iHigh(_Symbol, PERIOD_H4, 1), lo = iLow(_Symbol, PERIOD_H4, 1);
          if(hi > 0.0 && lo > 0.0)
            {
