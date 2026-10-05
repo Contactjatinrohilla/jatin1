@@ -29,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.26"
+#property version   "1.27"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -102,6 +102,14 @@ double BrokerMinDist()
   }
 
 bool Ours(const long magic, const string sym) { return sym == _Symbol && ((ulong)magic == InpMagic || (ulong)magic == InpMagic + 1); }
+
+int CountOrders()
+  {
+   int n = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+      if(OrderGetTicket(i) > 0 && Ours(OrderGetInteger(ORDER_MAGIC), OrderGetString(ORDER_SYMBOL))) n++;
+   return n;
+  }
 
 int CountPositions()
   {
@@ -244,6 +252,15 @@ bool PrevDay(const datetime today, double &hi, double &lo)
 
 void NewDay(const datetime today)
   {
+   // Safety net: if the market stopped before the day-end time there was no tick to clean up,
+   // so yesterday's orders / trades are removed here (otherwise they pile up day after day).
+   if(g_day != 0 && (CountOrders() > 0 || CountPositions() > 0))
+     {
+      PrintFormat("New day: %d order(s) and %d trade(s) left from %s (no tick after the day-end time) - removed",
+                  CountOrders(), CountPositions(), TimeToString(g_day, TIME_DATE));
+      DeleteOrders(0, "left from yesterday");
+      CloseAll("left from yesterday");
+     }
    g_day = today;
    g_pdhDone = false;
    g_tradesToday = 0;
