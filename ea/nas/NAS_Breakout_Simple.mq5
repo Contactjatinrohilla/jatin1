@@ -29,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.25"
+#property version   "1.26"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -45,9 +45,9 @@ input bool   InpUseTP      = false;          // Use fixed take profit (false = T
 input double InpFixedTP    = 100.0;          // Fixed take profit in points
 input double InpRR         = 2.0;            // Take profit = SL x this when fixed TP is off (0 = no take profit)
 input bool   InpUseBE      = false;          // Use breakeven
-input double InpBEPoints   = 30.0;           // Breakeven: move SL to entry +1 at this many points profit
+input double InpBEAt       = 5.0;            // Breakeven: move SL to entry +1 at this many points profit
 input bool   InpUseTrail   = false;          // Use trailing stop
-input double InpTrailFrom  = 50.0;           // Trailing starts at this many points profit
+input double InpTrailAt    = 5.0;            // Trailing starts at this many points profit
 input double InpTrailDist  = 40.0;           // Trailing: SL stays this many points behind price
 
 input group "=== Risk ==="
@@ -264,7 +264,7 @@ void NewDay(const datetime today)
 //+------------------------------------------------------------------+
 void ManageStops()
   {
-   bool be = InpUseBE && InpBEPoints > 0.0, trail = InpUseTrail && InpTrailFrom > 0.0;
+   bool be = InpUseBE && InpBEAt > 0.0, trail = InpUseTrail && InpTrailAt > 0.0;
    if(!be && !trail) return;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double gap = BrokerMinDist();
@@ -278,9 +278,9 @@ void ManageStops()
       double px     = buy ? bid : ask;
       double profit = buy ? bid - open : open - ask;
       double target = sl;
-      if(be && profit >= InpBEPoints)
+      if(be && profit >= InpBEAt)
          target = buy ? MathMax(target, open + BE_LOCK) : (target == 0.0 ? open - BE_LOCK : MathMin(target, open - BE_LOCK));
-      if(trail && profit >= InpTrailFrom)
+      if(trail && profit >= InpTrailAt)
          target = buy ? MathMax(target, px - InpTrailDist) : (target == 0.0 ? px + InpTrailDist : MathMin(target, px + InpTrailDist));
       if(buy)  target = MathMin(target, px - gap);           // broker minimum distance
       else     target = MathMax(target, px + gap);
@@ -304,8 +304,8 @@ int OnInit()
    else if(!InpUsePDH && !InpUseH4)                   err = "switch on at least one setup";
    else if(InpSL <= 0.0 || InpRR < 0.0 || InpFixedTP < 0.0) err = "SL must be > 0, TP and RR >= 0";
    else if(InpUseTP && InpFixedTP <= 0.0)                  err = "fixed TP must be > 0";
-   else if(InpUseBE && InpBEPoints <= 0.0)                  err = "breakeven must be > 0";
-   else if(InpUseTrail && (InpTrailFrom <= 0.0 || InpTrailDist <= 0.0)) err = "trailing start and distance must be > 0";
+   else if(InpUseBE && InpBEAt <= 0.0)                  err = "breakeven must be > 0";
+   else if(InpUseTrail && (InpTrailAt <= 0.0 || InpTrailDist <= 0.0)) err = "trailing start and distance must be > 0";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)     err = "risk must be > 0 and <= 5";
    else if(InpMaxTrades < 0)                          err = "max trades must be >= 0 (0 = no limit)";
    if(err != "") { Print("INVALID INPUT: ", err); return INIT_PARAMETERS_INCORRECT; }
@@ -315,8 +315,8 @@ int OnInit()
    PrintFormat("NAS Breakout Simple on %s | PDH %s | 4H %s | window %s | SL %g %s | BE %s | trail %s | risk %.2f%% | max trades/day %d (0 = no limit) | broker min distance %.2f",
                _Symbol, InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off", InpWindow, InpSL,
                InpUseTP ? StringFormat("TP %g (fixed)", InpFixedTP) : InpRR > 0.0 ? StringFormat("TP = %g x SL", InpRR) : "no TP",
-               InpUseBE ? StringFormat("%g", InpBEPoints) : "off",
-               InpUseTrail ? StringFormat("%g/%g", InpTrailFrom, InpTrailDist) : "off", InpRiskPct, InpMaxTrades, BrokerMinDist());
+               InpUseBE ? StringFormat("%g", InpBEAt) : "off",
+               InpUseTrail ? StringFormat("%g/%g", InpTrailAt, InpTrailDist) : "off", InpRiskPct, InpMaxTrades, BrokerMinDist());
    return INIT_SUCCEEDED;
   }
 
@@ -398,9 +398,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                    |
 //+------------------------------------------------------------------+
-// Ranges used when a box is ticked - MetaTrader's Start/Step/Stop columns are ignored.
+// SL, TP and trail distance: start 2, step 2 whatever the Inputs table shows.
+// Breakeven and trail start are NOT overridden: the table's Start (5 by default), Step and Stop are used as typed.
 // Tick the "Use ..." switch too (or set it to true) so the optimised value is actually used.
-// SL, TP, breakeven, trail start and trail distance: start 2, step 2. Or load NAS_Breakout_Simple_from_2_step_2.set.
 void Range(const string name, const double start, const double step, const double stop)
   {
    bool on = false;
@@ -414,10 +414,8 @@ int OnTesterInit()
    Range("InpSL",         2.0, 2.0, 200.0);
    Range("InpFixedTP",    2.0, 2.0, 400.0);
    Range("InpRR",         0.0, 0.5, 5.0);
-   Range("InpBEPoints",   2.0, 2.0, 200.0);
-   Range("InpTrailFrom",  2.0, 2.0, 200.0);
    Range("InpTrailDist",  2.0, 2.0, 150.0);
-   Print("Optimisation ranges: SL / TP / BE / trail start / trail distance start 2, step 2 (RR 0..5 step 0.5)");
+   Print("Optimisation ranges: SL / TP / trail distance start 2, step 2 (RR 0..5 step 0.5); breakeven and trail start use the Inputs table");
    return INIT_SUCCEEDED;
   }
 
