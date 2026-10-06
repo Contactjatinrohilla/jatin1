@@ -63,6 +63,11 @@ input double InpDailyLossPct    = 2.5;           // Max loss per day, % of the d
 input double InpWeeklyLossPct   = 8.5;           // Max loss per week, % of the week's starting balance
 input int    InpPropResetHour   = 0;             // Hour the prop firm's day starts, server time (0-23)
 
+// === V133 START ===
+input group "=== 6. Chart ==="
+input bool   InpShowLabels      = true;          // Show labels, killzone boxes and arrows on the chart
+// === V133 END ===
+
 input group "=== 7. Other ==="
 input ulong  InpMagic           = 930001;        // Order ID number (PDH = this, 4H = this + 1)
 // === V133 END ===
@@ -270,69 +275,239 @@ int SessionEnd(const int dow)
    return (last <= 0) ? 1440 : (int)MathMin((long)1440, last);
   }
 
-void HLine(const string name, const double price, const color clr)
+// === V133 START ===
+//+------------------------------------------------------------------+
+//|  Chart drawing (never touches an order or a trade)                |
+//|  Every object name starts with "NAS_", so your own drawings are   |
+//|  never touched. Nothing is drawn during optimisation.             |
+//+------------------------------------------------------------------+
+#define PFX           "NAS_"
+#define LBL_FONT      "Arial"
+#define LBL_SIZE      7         // label font size
+#define LBL_GAP       12        // minimum pixels between two labels (no overlap)
+#define LBL_REFRESH   250       // move the labels at most every 250 ms
+#define KEEP_DAYS     5         // killzone boxes and arrows older than this are deleted
+
+int      g_slCount = -1;        // number of this EA's open trades on the last tick (-1 = not known yet)
+uint     g_lastLabelMs = 0;     // last time the labels were moved
+string   g_kzNow = "";          // name of the killzone we are in now ("" = none)
+
+bool CanDraw()   { return !MQLInfoInteger(MQL_OPTIMIZATION); }
+bool ShowExtra() { return InpShowLabels && CanDraw(); }
+
+// A horizontal line. Its description is the label text shown at the right edge.
+void HLine(const string name, const double price, const color clr, const string text, const int style)
   {
-   if(MQLInfoInteger(MQL_OPTIMIZATION)) return;
+   if(!CanDraw()) return;
    if(ObjectFind(0, name) < 0)
      {
       if(!ObjectCreate(0, name, OBJ_HLINE, 0, 0, price)) return;
       ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
      }
    else if(!ObjectMove(0, name, 0, 0, price)) return;
-   ObjectSetString(0, name, OBJPROP_TEXT, name + " " + DoubleToString(price, _Digits));
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
   }
 
-int g_slCount = -1;   // number of this EA's open trades on the last tick (-1 = not known yet)
+// Short text with the price, e.g. "PDH 21450.50".
+string PriceText(const string what, const double price) { return what + " " + DoubleToString(price, _Digits); }
 
-// One dotted line per open trade at its stop loss, named "SL <ticket>".
-// Red = BUY, orange = SELL. Moves when breakeven / trailing moves the SL, deleted when the trade closes.
-// Drawing only - it never touches an order or a trade.
-void DrawSLLines()
+// One dotted SL line (and, with labels on, a TP line) per open trade. Lines follow breakeven / trailing
+// and are deleted when the trade closes. One loop over the open trades per tick.
+void DrawTradeLines()
   {
-   if(MQLInfoInteger(MQL_OPTIMIZATION)) return;             // nothing is drawn during optimisation
+   if(!CanDraw()) return;
    int  n = 0;
    bool created = false;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)           // one loop over the open trades
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
       if(t == 0 || !Ours(PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL))) continue;
       n++;
-      string name = "SL " + (string)t;
-      double sl   = PositionGetDouble(POSITION_SL);
-      if(sl <= 0.0)                                         // no stop loss = no line
+      bool   buy  = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      string side = buy ? "BUY" : "SELL";
+      for(int k = 0; k < 2; k++)                            // k = 0 stop loss, k = 1 take profit
         {
-         if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-         continue;
-        }
-      if(ObjectFind(0, name) < 0)                           // new trade: create its line
-        {
-         if(!ObjectCreate(0, name, OBJ_HLINE, 0, 0, sl)) continue;
-         bool buy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-         ObjectSetInteger(0, name, OBJPROP_COLOR, buy ? clrRed : clrOrange);
-         ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-         ObjectSetString(0, name, OBJPROP_TEXT, name + " " + DoubleToString(sl, _Digits));
-         created = true;
-        }
-      else if(MathAbs(ObjectGetDouble(0, name, OBJPROP_PRICE) - sl) > _Point / 2.0)   // SL moved: move the line
-        {
-         ObjectMove(0, name, 0, 0, sl);
-         ObjectSetString(0, name, OBJPROP_TEXT, name + " " + DoubleToString(sl, _Digits));
+         if(k == 1 && !InpShowLabels) break;                // TP lines only with labels on
+         string kind  = (k == 0) ? "SL" : "TP";
+         string name  = PFX + kind + "_" + (string)t;
+         double price = PositionGetDouble(k == 0 ? POSITION_SL : POSITION_TP);
+         if(price <= 0.0)                                   // no SL / TP = no line
+           {
+            if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+            continue;
+           }
+         bool exists = ObjectFind(0, name) >= 0;
+         if(exists && MathAbs(ObjectGetDouble(0, name, OBJPROP_PRICE) - price) <= _Point / 2.0) continue;   // not moved
+         color clr = (k == 0) ? (buy ? clrRed : clrOrange) : (buy ? clrLimeGreen : clrDeepSkyBlue);
+         HLine(name, price, clr, StringFormat("%s %s #%I64u %s", kind, side, t, DoubleToString(price, _Digits)), STYLE_DOT);
+         if(!exists) created = true;
         }
      }
-   // Remove lines of closed trades - only when the number of trades changed or a new line appeared.
-   if(n != g_slCount || created)
+   if(n != g_slCount || created)                            // a trade closed or opened: remove lines of closed trades
      {
       g_slCount = n;
       for(int k = ObjectsTotal(0, 0, OBJ_HLINE) - 1; k >= 0; k--)
         {
          string name = ObjectName(0, k, 0, OBJ_HLINE);
-         if(StringFind(name, "SL ") != 0) continue;         // not one of our SL lines
-         if(!PositionSelectByTicket((ulong)StringToInteger(StringSubstr(name, 3))))
-            ObjectDelete(0, name);                          // its trade is closed
+         if(StringFind(name, PFX + "SL_") != 0 && StringFind(name, PFX + "TP_") != 0) continue;
+         if(!PositionSelectByTicket((ulong)StringToInteger(StringSubstr(name, StringLen(PFX) + 3))))
+            ObjectDelete(0, name);
         }
      }
   }
+
+// Labels at the right edge of the chart for every EA line, sorted top to bottom and
+// pushed apart so they never overlap. Runs at most every 250 ms, only with labels on.
+void DrawRightLabels()
+  {
+   if(!ShowExtra() || GetTickCount() - g_lastLabelMs < LBL_REFRESH) return;
+   g_lastLabelMs = GetTickCount();
+   string names[];
+   int    ys[];
+   int    n = 0;
+   for(int k = ObjectsTotal(0, 0, OBJ_HLINE) - 1; k >= 0; k--)   // collect our lines and their pixel height
+     {
+      string line = ObjectName(0, k, 0, OBJ_HLINE);
+      if(StringFind(line, PFX) != 0) continue;
+      int x = 0, y = 0;
+      if(!ChartTimePriceToXY(0, 0, TimeCurrent(), ObjectGetDouble(0, line, OBJPROP_PRICE), x, y)) continue;
+      ArrayResize(names, n + 1);
+      ArrayResize(ys, n + 1);
+      int j = n++;
+      while(j > 0 && ys[j - 1] > y) { ys[j] = ys[j - 1]; names[j] = names[j - 1]; j--; }   // keep sorted by height
+      ys[j] = y;
+      names[j] = line;
+     }
+   for(int i = 0; i < n; i++)
+     {
+      int y = (i > 0 && ys[i] < ys[i - 1] + LBL_GAP) ? ys[i - 1] + LBL_GAP : ys[i];   // push down: no overlap
+      ys[i] = y;
+      string lbl = PFX + "LBL_" + names[i];
+      if(ObjectFind(0, lbl) < 0)
+        {
+         if(!ObjectCreate(0, lbl, OBJ_LABEL, 0, 0, 0)) continue;
+         ObjectSetInteger(0, lbl, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+         ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_RIGHT_LOWER);
+         ObjectSetInteger(0, lbl, OBJPROP_XDISTANCE, 5);
+         ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, LBL_SIZE);
+         ObjectSetString(0, lbl, OBJPROP_FONT, LBL_FONT);
+         ObjectSetInteger(0, lbl, OBJPROP_SELECTABLE, false);
+        }
+      ObjectSetInteger(0, lbl, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, lbl, OBJPROP_COLOR, ObjectGetInteger(0, names[i], OBJPROP_COLOR));
+      ObjectSetString(0, lbl, OBJPROP_TEXT, ObjectGetString(0, names[i], OBJPROP_TEXT));
+     }
+   for(int k = ObjectsTotal(0, 0, OBJ_LABEL) - 1; k >= 0; k--)   // labels whose line is gone
+     {
+      string lbl = ObjectName(0, k, 0, OBJ_LABEL);
+      if(StringFind(lbl, PFX + "LBL_") == 0 && ObjectFind(0, StringSubstr(lbl, StringLen(PFX) + 4)) < 0) ObjectDelete(0, lbl);
+     }
+  }
+
+// Which enabled killzone are we in now? Returns its name ("" = none) and its New York start / end minute.
+string KZNow(const datetime now, int &nyStart, int &nyEnd, color &clr)
+  {
+   int ny = ((MinuteOf(now) - g_nyShift * 60) % 1440 + 1440) % 1440;
+   if(InpKZAsian  && ny >= KZ_ASIAN_START  && ny < KZ_ASIAN_END)  { nyStart = KZ_ASIAN_START;  nyEnd = KZ_ASIAN_END;  clr = C'20,30,70'; return "Asian KZ"; }
+   if(InpKZLondon && ny >= KZ_LONDON_START && ny < KZ_LONDON_END) { nyStart = KZ_LONDON_START; nyEnd = KZ_LONDON_END; clr = C'20,60,30'; return "London KZ"; }
+   if(InpKZNYAM   && ny >= KZ_NYAM_START   && ny < KZ_NYAM_END)   { nyStart = KZ_NYAM_START;   nyEnd = KZ_NYAM_END;   clr = C'70,35,20'; return "NY AM KZ"; }
+   return "";
+  }
+
+// When a killzone starts: a shaded box behind the candles for the whole killzone, with its name.
+void DrawKillzone(const datetime now)
+  {
+   if(!CanDraw()) return;
+   int a = 0, b = 0;
+   color clr = clrNONE;
+   string kz = KZUsed() ? KZNow(now, a, b, clr) : "";
+   if(kz == g_kzNow) return;                                // only when the killzone changes
+   g_kzNow = kz;
+   if(kz == "" || !ShowExtra()) return;
+   int ny = ((MinuteOf(now) - g_nyShift * 60) % 1440 + 1440) % 1440;
+   datetime t1 = (datetime)((long)now - (long)(ny - a) * 60 - (long)now % 60);   // killzone start
+   datetime t2 = (datetime)((long)t1 + (long)(b - a) * 60);                   // killzone end
+   string box = PFX + "KZ_" + (string)(long)t1;
+   double top = SymbolInfoDouble(_Symbol, SYMBOL_BID) * 2.0;                 // tall enough to fill the chart
+   if(ObjectFind(0, box) < 0 && ObjectCreate(0, box, OBJ_RECTANGLE, 0, t1, 0.0, t2, top))
+     {
+      ObjectSetInteger(0, box, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, box, OBJPROP_FILL, true);
+      ObjectSetInteger(0, box, OBJPROP_BACK, true);         // behind the candles
+      ObjectSetInteger(0, box, OBJPROP_SELECTABLE, false);
+     }
+   string txt = PFX + "KZT_" + (string)(long)t1;
+   double y = ChartGetDouble(0, CHART_PRICE_MAX);           // name at the top of the visible chart
+   if(y <= 0.0) y = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ObjectFind(0, txt) < 0 && ObjectCreate(0, txt, OBJ_TEXT, 0, t1, y))
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, kz);
+      ObjectSetString(0, txt, OBJPROP_FONT, LBL_FONT);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, LBL_SIZE);
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, clrSilver);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, txt, OBJPROP_SELECTABLE, false);
+     }
+  }
+
+// A small arrow and "Confirmed BUY / SELL" where a candle-close confirmation happened.
+void DrawConfirm(const bool buy, const double level, const string tag)
+  {
+   if(!ShowExtra()) return;
+   datetime t = TimeCurrent();
+   string id  = (string)(long)t + "_" + tag + (buy ? "B" : "S");
+   string arw = PFX + "CF_" + id, txt = PFX + "CFT_" + id;
+   color  clr = buy ? clrDeepSkyBlue : clrOrangeRed;
+   if(ObjectCreate(0, arw, buy ? OBJ_ARROW_UP : OBJ_ARROW_DOWN, 0, t, level))
+     {
+      ObjectSetInteger(0, arw, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, arw, OBJPROP_ANCHOR, buy ? ANCHOR_TOP : ANCHOR_BOTTOM);
+      ObjectSetInteger(0, arw, OBJPROP_SELECTABLE, false);
+     }
+   if(ObjectCreate(0, txt, OBJ_TEXT, 0, t, level))
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, buy ? "Confirmed BUY" : "Confirmed SELL");
+      ObjectSetString(0, txt, OBJPROP_FONT, LBL_FONT);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, LBL_SIZE);
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, buy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, txt, OBJPROP_SELECTABLE, false);
+     }
+  }
+
+// Once a day: delete killzone boxes and arrows older than 5 days, so the chart does not fill up.
+void DeleteOldDrawings(const datetime now)
+  {
+   if(!CanDraw()) return;
+   datetime limit = (datetime)((long)now - KEEP_DAYS * 86400);
+   for(int k = ObjectsTotal(0) - 1; k >= 0; k--)
+     {
+      string name = ObjectName(0, k);
+      if(StringFind(name, PFX + "KZ") != 0 && StringFind(name, PFX + "CF") != 0) continue;
+      if((datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0) < limit) ObjectDelete(0, name);
+     }
+  }
+
+// Chart text, top-left corner: one item per line.
+void ShowChartText()
+  {
+   if(!CanDraw()) return;
+   string kz   = !KZUsed() ? "off" : (g_kzNow != "" ? g_kzNow + " (now)" : "outside killzones");
+   string text = StringFormat("NAS Breakout | %s", _Symbol) +
+                 StringFormat("\nSetups: PDH %s | 4H %s", InpUsePDH ? "on" : "off", InpUseH4 ? "on" : "off") +
+                 StringFormat("\nKillzone: %s", kz) +
+                 StringFormat("\nTrades today: %d | open now: %d", g_tradesToday, CountPositions());
+   if(InpUsePropRisk)
+      text += StringFormat("\nDaily loss %.1f%% / %.1f%% | Weekly %.1f%% / %.1f%%",
+                           MathMax(0.0, g_dayLossPct), InpDailyLossPct, MathMax(0.0, g_weekLossPct), InpWeeklyLossPct);
+   if(g_timeBad)          text += "\n!! TIME MISMATCH - check InpBrokerGMTWinter / InpBrokerDST";
+   else if(PropBlocked()) text += "\n!! LOSS LIMIT REACHED - no new orders";
+   text += "\nStatus: " + g_status;
+   Comment(text);
+  }
+// === V133 END ===
 
 // True when hi/lo look like real prices (protects against broken history).
 bool LevelsSane(const double hi, const double lo)
@@ -581,6 +756,7 @@ void Confirmed(const bool buy, const double level, const double close, const ulo
   {
    PrintFormat("[%s] %s confirmed: %d-min candle closed %.*f, %s %.*f", tag, buy ? "BUY" : "SELL",
                InpConfirmMinutes, _Digits, close, buy ? "above" : "below", _Digits, level);   // V133: shorter log
+   DrawConfirm(buy, level, tag);                            // V133: arrow + "Confirmed BUY / SELL"
    if(InpEnterAtClose) { PlaceMarket(buy, magic, tag); return; }   // enter now at market price
    PlaceLimit(buy, Norm(level), magic, tag);
   }
@@ -665,13 +841,14 @@ void NewDay(const datetime today)
      {
       PrintFormat("=== %s | PDH %.*f | PDL %.*f | closes %02d:%02d", TimeToString(today, TIME_DATE),
                   _Digits, g_pdh, _Digits, g_pdl, g_dayEnd / 60, g_dayEnd % 60);   // V133: shorter log
-      HLine("PDH", g_pdh, clrDodgerBlue);
-      HLine("PDL", g_pdl, clrOrangeRed);
+      HLine(PFX + "PDH", g_pdh, clrDodgerBlue, PriceText("PDH", g_pdh), STYLE_DASH);   // V133: NAS_ names + label text
+      HLine(PFX + "PDL", g_pdl, clrOrangeRed, PriceText("PDL", g_pdl), STYLE_DASH);
      }
    else PrintFormat("=== %s | no PDH/PDL today (holiday or missing history)", TimeToString(today, TIME_DATE));   // V133: shorter log
    g_pdhBuyDone = g_pdhSellDone = false;                    // both PDH sides can trigger again today
    // === V133 START ===
    g_nyShift = ServerMinusNYHours(today, InpBrokerGMTWinter, InpBrokerDST);   // server - New York, for today
+   DeleteOldDrawings(today);                                // killzone boxes / arrows older than 5 days
    // (the prop starting balances are now read in OnTick when a new prop day starts)
    // === V133 END ===
   }
@@ -733,8 +910,12 @@ int OnInit()
    // === V133 END ===
    if(err != "") { Print("INVALID INPUT: ", err); return INIT_PARAMETERS_INCORRECT; }
 
-   ObjectsDeleteAll(0, "SL ");                              // remove SL lines left from an earlier run
+   // === V133 START ===
+   if(CanDraw()) ObjectsDeleteAll(0, PFX);                  // remove EA drawings left from an earlier run
    g_slCount = -1;
+   g_kzNow = "";
+   if(ShowExtra()) ChartSetInteger(0, CHART_SHIFT, true);   // free space on the right for the labels
+   // === V133 END ===
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(200);
    // === V133 START === short start-up summary, one topic per line
@@ -764,7 +945,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    Comment("");
-   ObjectsDeleteAll(0, "SL ");                              // no SL lines stay on the chart
+   ObjectsDeleteAll(0, PFX);                                // V133: remove every EA drawing
   }
 
 void OnTick()
@@ -841,8 +1022,8 @@ void OnTick()
          double hi = iHigh(_Symbol, PERIOD_H4, 1), lo = iLow(_Symbol, PERIOD_H4, 1);
          if(hi > 0.0 && lo > 0.0)
            {
-            HLine("H4 high", hi, clrLime);
-            HLine("H4 low", lo, clrMagenta);
+            HLine(PFX + "H4H", hi, clrLime, PriceText("4H High", hi), STYLE_DASH);   // V133: NAS_ names + label text
+            HLine(PFX + "H4L", lo, clrMagenta, PriceText("4H Low", lo), STYLE_DASH);
             if(InpUseConfirm)
                ConfirmNewH4(hi, lo);                        // remember the levels, wait for a candle close
             else
@@ -853,17 +1034,12 @@ void OnTick()
       g_status = StringFormat("%d open, waiting for breakouts", CountPositions());
      }
 
-   DrawSLLines();                                           // update the stop loss lines once per tick
-
-   if(!MQLInfoInteger(MQL_OPTIMIZATION))
-     {
-      string text = StringFormat("NAS Breakout Simple | %s\nPDH %.*f  PDL %.*f | trades today %d | %s",
-                                 _Symbol, _Digits, g_pdh, _Digits, g_pdl, g_tradesToday, g_status);
-      if(InpUsePropRisk)
-         text += StringFormat("\nDaily loss %.1f%% / %.1f%% | Weekly %.1f%% / %.1f%%%s", MathMax(0.0, g_dayLossPct), InpDailyLossPct,
-                              MathMax(0.0, g_weekLossPct), InpWeeklyLossPct, PropBlocked() ? " | LIMIT REACHED" : "");
-      Comment(text);
-     }
+   // === V133 START === drawing only - never changes a trade
+   DrawTradeLines();                                        // SL / TP lines, once per tick
+   DrawKillzone(now);                                       // box when a killzone starts
+   DrawRightLabels();                                       // right-edge labels, at most every 250 ms
+   ShowChartText();
+   // === V133 END ===
   }
 
 // Fills and closes are only logged - no order is cancelled when another one fills.
