@@ -2,55 +2,22 @@
 //|                                 NAS_PDH_PDL_Breakout_v133.mq5    |
 //|                                                                  |
 //|  Nasdaq 100 CFD (NAS100 / US100 / USTEC / NDX100) breakouts.      |
-//|  Two simple setups, both traded independently:                    |
 //|                                                                  |
-//|  1. PDH / PDL  - once a day: BUY STOP at yesterday's high,        |
-//|                  SELL STOP at yesterday's low.                    |
-//|  2. 4H STRADDLE - as soon as a new 4-hour candle opens: BUY STOP  |
-//|                  at the high and SELL STOP at the low of the      |
-//|                  candle that just closed. When the next 4H candle |
-//|                  opens, the old 4H orders still waiting are       |
-//|                  deleted and the new pair is placed (open trades  |
-//|                  keep running with their SL / TP).                |
+//|  Two setups, traded independently:                               |
+//|  1. PDH / PDL - yesterday's high and low.                        |
+//|  2. 4H        - high and low of the last finished 4-hour candle. |
 //|                                                                  |
-//|  NO order is cancelled when another one fills: both sides of a    |
-//|  level stay active, PDH and 4H trades can run at the same time.   |
-//|  Stop loss and take profit go on the order; optional breakeven    |
-//|  and trailing stop protect the profit. Everything is closed at    |
-//|  the window end and 5 minutes before the broker's daily close -   |
-//|  nothing is held overnight or over the weekend (unfilled PDH      |
-//|  orders are only deleted then).                                   |
+//|  Entry: a stop order on the level, or (confirmation on) wait for |
+//|  a candle to CLOSE past the level, then a limit order back at    |
+//|  the level or a market order at once.                            |
+//|  Every trade: fixed SL / TP in index points, lot from risk %,    |
+//|  optional breakeven / trailing. Optional killzones (New York     |
+//|  time), prop firm daily / weekly loss limits, live time lock.    |
+//|  Nothing is held overnight: all closed at the window end and     |
+//|  5 minutes before the broker's daily close.                      |
 //|                                                                  |
-//|  Built in (no inputs needed): short Sunday daily candles are      |
-//|  skipped, broken history (impossible levels) is skipped, lot size |
-//|  is reduced if margin is short, broker stop levels are respected. |
-//|                                                                  |
-//|  Distances are in INDEX POINTS: 50 = a 50-point Nasdaq move.      |
-//|  Times are SERVER time (Market Watch clock).                      |
-//|                                                                  |
-//|  New in 1.30 (both can be switched off = exactly like 1.29):      |
-//|  - Prop firm limits: stop for the day / week when the account     |
-//|    has lost the daily / weekly %, and never place an order that   |
-//|    could break a limit if every stop loss were hit.               |
-//|  - Candle close confirmation: instead of stop orders on the       |
-//|    levels, wait for an N-minute candle to CLOSE past a level,     |
-//|    then place a LIMIT order back at the level.                    |
-//|                                                                  |
-//|  New in 1.31 (display only, trading is identical to 1.30):        |
-//|  - a dotted line shows the stop loss of every open EA trade       |
-//|    (red = BUY, orange = SELL) and follows breakeven / trailing.   |
-//|  - optimisation of the confirmation candle: 1 to 60 minutes.      |
-//|                                                                  |
-//|  New in 1.32: InpEnterAtClose = true enters IMMEDIATELY at the    |
-//|  market price when the confirmation candle closes, instead of     |
-//|  a limit order back at the level. false = exactly like 1.31.      |
-//|                                                                  |
-//|  New in 1.33 (all off / 0 = exactly like 1.32):                   |
-//|  - Killzones in New York time (Asian, London, NY AM): new orders  |
-//|    only inside the killzones you switch on.                       |
-//|  - Live time lock: no new orders if the broker clock does not     |
-//|    match InpBrokerGMTWinter / InpBrokerDST (live trading only).   |
-//|  - Prop firm day can start at any server hour.                    |
+//|  Distances are INDEX POINTS (50 = a 50-point Nasdaq move).       |
+//|  Times are SERVER time unless they say New York.                 |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
 #property version   "1.33"
@@ -132,19 +99,15 @@ datetime g_nextTimeCheck = 0;         // live time lock: next check time
 datetime g_propDay = 0;               // start of the current prop firm day
 // === V133 END ===
 
-// === PROP RISK START ===
 datetime g_week = 0;                              // Monday 00:00 of the current week
 double   g_dayStartBal = 0, g_weekStartBal = 0;   // balance at the start of the day / week
 double   g_dayLossPct = 0, g_weekLossPct = 0;     // current loss in % (updated every tick)
 bool     g_dayBlocked = false, g_weekBlocked = false;   // true = limit reached, no new orders
-// === PROP RISK END ===
 
-// === CANDLE CONFIRM START ===
 datetime g_cfLast = 0;                            // end time of the last confirmation candle we checked
 bool     g_pdhBuyDone = false, g_pdhSellDone = false;   // each PDH side triggers once a day
 double   g_h4Hi = 0, g_h4Lo = 0;                  // levels of the 4H candle that just closed
 bool     g_h4Ok = false, g_h4BuyDone = false, g_h4SellDone = false;   // each 4H side triggers once per 4H candle
-// === CANDLE CONFIRM END ===
 
 //+------------------------------------------------------------------+
 //|  Helpers                                                          |
@@ -320,7 +283,6 @@ void HLine(const string name, const double price, const color clr)
    ObjectSetString(0, name, OBJPROP_TEXT, name + " " + DoubleToString(price, _Digits));
   }
 
-// === SL LINE START ===
 int g_slCount = -1;   // number of this EA's open trades on the last tick (-1 = not known yet)
 
 // One dotted line per open trade at its stop loss, named "SL <ticket>".
@@ -371,7 +333,6 @@ void DrawSLLines()
         }
      }
   }
-// === SL LINE END ===
 
 // True when hi/lo look like real prices (protects against broken history).
 bool LevelsSane(const double hi, const double lo)
@@ -379,7 +340,6 @@ bool LevelsSane(const double hi, const double lo)
    return lo > 0.0 && hi > lo && (hi - lo) <= hi * MAX_RANGE_PCT / 100.0;
   }
 
-// === PROP RISK START ===
 //+------------------------------------------------------------------+
 //|  Prop firm daily / weekly loss limits                             |
 //+------------------------------------------------------------------+
@@ -493,7 +453,6 @@ bool PropOrderAllowed(const bool buy, const double entry, const double sl, const
      }
    return true;
   }
-// === PROP RISK END ===
 
 //+------------------------------------------------------------------+
 //|  Orders                                                          |
@@ -519,6 +478,31 @@ double LotSize(const bool buy, const double entry, const double sl)
    return NormalizeDouble(lots, (int)MathMax(0.0, MathRound(-MathLog10(step))));
   }
 
+// === V133 START ===
+// Shared by all 3 order types: stop loss, take profit, lot size and the prop check.
+// False = do not place the order (the reason is printed).
+bool OrderPlan(const bool buy, const double entry, const string tag, double &sl, double &tp, double &lot)
+  {
+   double gap = BrokerMinDist();
+   if(InpSL <= gap) { PrintFormat("[%s] SL %g is smaller than the broker minimum %.2f", tag, InpSL, gap); return false; }
+   sl = Norm(buy ? entry - InpSL : entry + InpSL);
+   double tpDist = (InpUseTP && InpFixedTP > 0.0) ? InpFixedTP : InpSL * InpRR;   // fixed TP wins over the ratio
+   tp = (tpDist > 0.0) ? Norm(buy ? entry + tpDist : entry - tpDist) : 0.0;
+   if(sl <= 0.0) return false;
+   lot = LotSize(buy, entry, sl);
+   if(lot <= 0.0) return false;
+   return PropOrderAllowed(buy, entry, sl, lot, tag);
+  }
+
+// Log the result of an order request.
+void LogOrder(const bool ok, const string tag, const string what, const double lot, const double entry, const double sl, const double tp)
+  {
+   if(ok) PrintFormat("[%s] %s %.2f lots @ %.*f  SL %.*f  TP %s", tag, what, lot, _Digits, entry, _Digits, sl,
+                      tp > 0.0 ? DoubleToString(tp, _Digits) : "none");
+   else   PrintFormat("[%s] %s rejected: %s", tag, what, trade.ResultRetcodeDescription());
+  }
+// === V133 END ===
+
 // One stop order at 'entry'. tag = "PDH" or "H4".
 void PlaceStop(const bool buy, const double entry, const ulong magic, const string tag)
   {
@@ -527,25 +511,15 @@ void PlaceStop(const bool buy, const double entry, const ulong magic, const stri
    string side = buy ? "BUY" : "SELL";
    if(buy ? ask >= entry - gap : bid <= entry + gap)
      {
-      PrintFormat("[%s] %s skipped: price already past %.*f", tag, side, _Digits, entry);   // V133: shorter log
+      PrintFormat("[%s] %s skipped: price already past %.*f", tag, side, _Digits, entry);
       return;
      }
-   if(InpSL <= gap) { PrintFormat("[%s] SL %g is smaller than the broker minimum %.2f", tag, InpSL, gap); return; }
-   double sl  = Norm(buy ? entry - InpSL : entry + InpSL);
-   double tpDist = (InpUseTP && InpFixedTP > 0.0) ? InpFixedTP : InpSL * InpRR;   // fixed TP wins over RR
-   double tp  = (tpDist > 0.0) ? Norm(buy ? entry + tpDist : entry - tpDist) : 0.0;
-   if(sl <= 0.0 || tp < 0.0) return;
-   double lot = LotSize(buy, entry, sl);
-   if(lot <= 0.0) return;
-   // === PROP RISK START ===
-   if(!PropOrderAllowed(buy, entry, sl, lot, tag)) return;
-   // === PROP RISK END ===
+   double sl = 0.0, tp = 0.0, lot = 0.0;
+   if(!OrderPlan(buy, entry, tag, sl, tp, lot)) return;     // V133: shared calculation
    trade.SetExpertMagicNumber(magic);
    bool ok = buy ? trade.BuyStop(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, tag)
                  : trade.SellStop(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, tag);
-   if(ok) PrintFormat("[%s] %s STOP %.2f lots @ %.*f  SL %.*f  TP %s", tag, side, lot, _Digits, entry, _Digits, sl,
-                      tp > 0.0 ? DoubleToString(tp, _Digits) : "none");
-   else   PrintFormat("[%s] %s STOP rejected: %s", tag, side, trade.ResultRetcodeDescription());
+   LogOrder(ok, tag, side + " STOP", lot, entry, sl, tp);
   }
 
 // Both sides of a straddle around hi / lo.
@@ -556,7 +530,6 @@ void Straddle(const double hi, const double lo, const ulong magic, const string 
    PlaceStop(false, Norm(lo), magic, tag);
   }
 
-// === CANDLE CONFIRM START ===
 //+------------------------------------------------------------------+
 //|  Candle close confirmation                                        |
 //+------------------------------------------------------------------+
@@ -569,54 +542,30 @@ void PlaceLimit(const bool buy, const double entry, const ulong magic, const str
    string side = buy ? "BUY" : "SELL";
    if(buy ? ask <= entry + gap : bid >= entry - gap)          // a limit order must wait on the far side of price
      {
-      PrintFormat("[%s] %s LIMIT skipped: price already back at %.*f", tag, side, _Digits, entry);   // V133: shorter log
+      PrintFormat("[%s] %s LIMIT skipped: price already back at %.*f", tag, side, _Digits, entry);
       return;
      }
-   if(InpSL <= gap) { PrintFormat("[%s] SL %g is smaller than the broker minimum %.2f", tag, InpSL, gap); return; }
-   double sl  = Norm(buy ? entry - InpSL : entry + InpSL);
-   double tpDist = (InpUseTP && InpFixedTP > 0.0) ? InpFixedTP : InpSL * InpRR;   // fixed TP wins over RR
-   double tp  = (tpDist > 0.0) ? Norm(buy ? entry + tpDist : entry - tpDist) : 0.0;
-   if(sl <= 0.0 || tp < 0.0) return;
-   double lot = LotSize(buy, entry, sl);
-   if(lot <= 0.0) return;
-   // === PROP RISK START ===
-   if(!PropOrderAllowed(buy, entry, sl, lot, tag)) return;
-   // === PROP RISK END ===
+   double sl = 0.0, tp = 0.0, lot = 0.0;
+   if(!OrderPlan(buy, entry, tag, sl, tp, lot)) return;     // V133: shared calculation
    trade.SetExpertMagicNumber(magic);
    bool ok = buy ? trade.BuyLimit(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, tag)
                  : trade.SellLimit(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, tag);
-   if(ok) PrintFormat("[%s] %s LIMIT %.2f lots @ %.*f  SL %.*f  TP %s", tag, side, lot, _Digits, entry, _Digits, sl,
-                      tp > 0.0 ? DoubleToString(tp, _Digits) : "none");
-   else   PrintFormat("[%s] %s LIMIT rejected: %s", tag, side, trade.ResultRetcodeDescription());
+   LogOrder(ok, tag, side + " LIMIT", lot, entry, sl, tp);
   }
 
-// === ENTER AT CLOSE START ===
 // Enter immediately at the current market price (BUY at Ask, SELL at Bid).
 // Stop loss and take profit are the same DISTANCE as always, measured from the real entry price,
 // and the lot size uses the same risk %, so the risk per trade stays identical.
 void PlaceMarket(const bool buy, const ulong magic, const string tag)
   {
    double entry = buy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double gap = BrokerMinDist();
-   string side = buy ? "BUY" : "SELL";
-   if(InpSL <= gap) { PrintFormat("[%s] SL %g is smaller than the broker minimum %.2f", tag, InpSL, gap); return; }
-   double sl  = Norm(buy ? entry - InpSL : entry + InpSL);
-   double tpDist = (InpUseTP && InpFixedTP > 0.0) ? InpFixedTP : InpSL * InpRR;   // fixed TP wins over RR
-   double tp  = (tpDist > 0.0) ? Norm(buy ? entry + tpDist : entry - tpDist) : 0.0;
-   if(sl <= 0.0 || tp < 0.0) return;
-   double lot = LotSize(buy, entry, sl);
-   if(lot <= 0.0) return;
-   // === PROP RISK START ===
-   if(!PropOrderAllowed(buy, entry, sl, lot, tag)) return;
-   // === PROP RISK END ===
+   double sl = 0.0, tp = 0.0, lot = 0.0;
+   if(!OrderPlan(buy, entry, tag, sl, tp, lot)) return;     // V133: shared calculation
    trade.SetExpertMagicNumber(magic);
    bool ok = buy ? trade.Buy(lot, _Symbol, 0.0, sl, tp, tag)
                  : trade.Sell(lot, _Symbol, 0.0, sl, tp, tag);
-   if(ok) PrintFormat("[%s] %s at market %.2f lots @ %.*f  SL %.*f  TP %s", tag, side, lot, _Digits, entry, _Digits, sl,
-                      tp > 0.0 ? DoubleToString(tp, _Digits) : "none");
-   else   PrintFormat("[%s] %s at market rejected: %s", tag, side, trade.ResultRetcodeDescription());
+   LogOrder(ok, tag, buy ? "BUY at market" : "SELL at market", lot, entry, sl, tp);
   }
-// === ENTER AT CLOSE END ===
 
 // Start time of the confirmation candle that contains time t (candles are counted from server midnight;
 // the last candle of the day is shorter if the minutes do not divide 24 hours evenly).
@@ -632,9 +581,7 @@ void Confirmed(const bool buy, const double level, const double close, const ulo
   {
    PrintFormat("[%s] %s confirmed: %d-min candle closed %.*f, %s %.*f", tag, buy ? "BUY" : "SELL",
                InpConfirmMinutes, _Digits, close, buy ? "above" : "below", _Digits, level);   // V133: shorter log
-   // === ENTER AT CLOSE START ===
    if(InpEnterAtClose) { PlaceMarket(buy, magic, tag); return; }   // enter now at market price
-   // === ENTER AT CLOSE END ===
    PlaceLimit(buy, Norm(level), magic, tag);
   }
 
@@ -676,7 +623,6 @@ void ConfirmCheck()
       if(!g_h4SellDone && close < g_h4Lo && prev >= g_h4Lo) { g_h4SellDone = true; Confirmed(false, g_h4Lo, close, InpMagic + 1, "H4"); }
      }
   }
-// === CANDLE CONFIRM END ===
 
 //+------------------------------------------------------------------+
 //|  Daily levels                                                    |
@@ -723,9 +669,7 @@ void NewDay(const datetime today)
       HLine("PDL", g_pdl, clrOrangeRed);
      }
    else PrintFormat("=== %s | no PDH/PDL today (holiday or missing history)", TimeToString(today, TIME_DATE));   // V133: shorter log
-   // === CANDLE CONFIRM START ===
    g_pdhBuyDone = g_pdhSellDone = false;                    // both PDH sides can trigger again today
-   // === CANDLE CONFIRM END ===
    // === V133 START ===
    g_nyShift = ServerMinusNYHours(today, InpBrokerGMTWinter, InpBrokerDST);   // server - New York, for today
    // (the prop starting balances are now read in OnTick when a new prop day starts)
@@ -737,7 +681,7 @@ void NewDay(const datetime today)
 //+------------------------------------------------------------------+
 void ManageStops()
   {
-   bool be = InpUseBE && InpBEAt > 0.0, trail = InpUseTrail && InpTrailAt > 0.0;
+   bool be = InpUseBE, trail = InpUseTrail;                 // V133: start-up already checks the values are > 0
    if(!be && !trail) return;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double gap = BrokerMinDist();
@@ -781,22 +725,16 @@ int OnInit()
    else if(InpUseTrail && (InpTrailAt <= 0.0 || InpTrailDist <= 0.0)) err = "trailing start and distance must be > 0";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)     err = "risk must be > 0 and <= 5";
    else if(InpMaxTrades < 0)                          err = "max trades must be >= 0 (0 = no limit)";
-   // === PROP RISK START ===
    else if(InpUsePropRisk && (InpDailyLossPct <= 0.0 || InpWeeklyLossPct <= 0.0)) err = "daily and weekly loss limits must be > 0";
-   // === PROP RISK END ===
-   // === CANDLE CONFIRM START ===
    else if(InpUseConfirm && (InpConfirmMinutes < 1 || InpConfirmMinutes > 240)) err = "confirmation candle must be 1 to 240 minutes";
-   // === CANDLE CONFIRM END ===
    // === V133 START ===
    else if(InpBrokerGMTWinter < -12 || InpBrokerGMTWinter > 14) err = "broker GMT offset must be -12 to 14";
    else if(InpPropResetHour < 0 || InpPropResetHour > 23)      err = "prop reset hour must be 0 to 23";
    // === V133 END ===
    if(err != "") { Print("INVALID INPUT: ", err); return INIT_PARAMETERS_INCORRECT; }
 
-   // === SL LINE START ===
    ObjectsDeleteAll(0, "SL ");                              // remove SL lines left from an earlier run
    g_slCount = -1;
-   // === SL LINE END ===
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(200);
    // === V133 START === short start-up summary, one topic per line
@@ -807,13 +745,9 @@ int OnInit()
                InpUseTrail ? StringFormat("from %g, %g behind", InpTrailAt, InpTrailDist) : "off");
    PrintFormat("Risk %.2f%% per trade | max trades/day %s", InpRiskPct, InpMaxTrades > 0 ? IntegerToString(InpMaxTrades) : "no limit");
    // === V133 END ===
-   // === PROP RISK START ===
    PrintFormat("Loss limits: %s", InpUsePropRisk ? StringFormat("%g%% a day, %g%% a week", InpDailyLossPct, InpWeeklyLossPct) : "off");
-   // === PROP RISK END ===
-   // === CANDLE CONFIRM START ===
    PrintFormat("Entry: %s", InpUseConfirm ? StringFormat("%d-min candle close, then %s", InpConfirmMinutes,
                InpEnterAtClose ? "market order" : "limit order at the level") : "stop order on the level");
-   // === CANDLE CONFIRM END ===
    // === V133 START ===
    int sh = ServerMinusNYHours(TimeCurrent(), InpBrokerGMTWinter, InpBrokerDST);
    if(KZUsed())
@@ -830,9 +764,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    Comment("");
-   // === SL LINE START ===
    ObjectsDeleteAll(0, "SL ");                              // no SL lines stay on the chart
-   // === SL LINE END ===
   }
 
 void OnTick()
@@ -860,9 +792,7 @@ void OnTick()
 
    ManageStops();
 
-   // === PROP RISK START ===
    PropCheckEquity();                                       // one equity comparison per tick
-   // === PROP RISK END ===
 
    // end of the trading day: nothing stays open
    if(mins >= g_dayEnd || mins < g_winStart)
@@ -876,10 +806,8 @@ void OnTick()
       DeleteOrders(0, "max trades for today reached");
       g_status = "max trades for today reached";
      }
-   // === PROP RISK START ===
    else if(PropBlocked())
       g_status = "loss limit reached - no new orders";
-   // === PROP RISK END ===
    // === V133 START ===
    else if(g_timeBad)                                       // live time lock: open trades keep their SL / TP
      {
@@ -898,12 +826,10 @@ void OnTick()
       if(InpUsePDH && !g_pdhDone && g_pdhOk)
         {
          g_pdhDone = true;
-         // === CANDLE CONFIRM START ===
          if(InpUseConfirm)
             PrintFormat("[PDH] waiting for a %d-min close above %.*f or below %.*f", InpConfirmMinutes, _Digits, g_pdh, _Digits, g_pdl);
          else
             Straddle(g_pdh, g_pdl, InpMagic, "PDH");        // original: stop orders on the levels
-         // === CANDLE CONFIRM END ===
         }
       // 2) 4H straddle - as soon as each new 4H candle opens: old 4H orders out, new pair in
       datetime h4 = iTime(_Symbol, PERIOD_H4, 0);
@@ -911,41 +837,31 @@ void OnTick()
         {
          g_h4 = h4;
          DeleteOrders(InpMagic + 1, "new 4H candle - old 4H order replaced");
-         // === CANDLE CONFIRM START ===
          g_h4Ok = false;                                    // old 4H levels are finished
-         // === CANDLE CONFIRM END ===
          double hi = iHigh(_Symbol, PERIOD_H4, 1), lo = iLow(_Symbol, PERIOD_H4, 1);
          if(hi > 0.0 && lo > 0.0)
            {
             HLine("H4 high", hi, clrLime);
             HLine("H4 low", lo, clrMagenta);
-            // === CANDLE CONFIRM START ===
             if(InpUseConfirm)
                ConfirmNewH4(hi, lo);                        // remember the levels, wait for a candle close
             else
                Straddle(hi, lo, InpMagic + 1, "H4");        // original: stop orders on the levels
-            // === CANDLE CONFIRM END ===
            }
         }
-      // === CANDLE CONFIRM START ===
       if(InpUseConfirm) ConfirmCheck();                     // real work only once per finished candle
-      // === CANDLE CONFIRM END ===
       g_status = StringFormat("%d open, waiting for breakouts", CountPositions());
      }
 
-   // === SL LINE START ===
    DrawSLLines();                                           // update the stop loss lines once per tick
-   // === SL LINE END ===
 
    if(!MQLInfoInteger(MQL_OPTIMIZATION))
      {
       string text = StringFormat("NAS Breakout Simple | %s\nPDH %.*f  PDL %.*f | trades today %d | %s",
                                  _Symbol, _Digits, g_pdh, _Digits, g_pdl, g_tradesToday, g_status);
-      // === PROP RISK START ===
       if(InpUsePropRisk)
          text += StringFormat("\nDaily loss %.1f%% / %.1f%% | Weekly %.1f%% / %.1f%%%s", MathMax(0.0, g_dayLossPct), InpDailyLossPct,
                               MathMax(0.0, g_weekLossPct), InpWeeklyLossPct, PropBlocked() ? " | LIMIT REACHED" : "");
-      // === PROP RISK END ===
       Comment(text);
      }
   }
@@ -992,10 +908,8 @@ int OnTesterInit()
    Range("InpFixedTP",    2.0, 2.0, 400.0);
    Range("InpRR",         0.0, 0.5, 5.0);
    Range("InpTrailDist",  5.0, 2.0, 150.0);
-   // === CONFIRM RANGE START ===
    Range("InpConfirmMinutes", 1, 1, 60);                   // confirmation candle: 1 to 60 minutes, step 1
    Print("Optimisation ranges: SL / TP start 2, trail distance start 5, step 2 (RR 0..5 step 0.5); confirmation minutes 1..60 step 1; breakeven and trail start use the Inputs table");
-   // === CONFIRM RANGE END ===
    return INIT_SUCCEEDED;
   }
 
