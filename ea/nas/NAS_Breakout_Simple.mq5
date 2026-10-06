@@ -29,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.28"
+#property version   "1.29"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -48,7 +48,7 @@ input bool   InpUseBE      = false;          // Use breakeven
 input double InpBEAt       = 5.0;            // Breakeven: move SL to entry +1 at this many points profit
 input bool   InpUseTrail   = false;          // Use trailing stop
 input double InpTrailAt    = 5.0;            // Trailing starts at this many points profit
-input double InpTrailDist  = 40.0;           // Trailing: SL stays this many points behind price
+input double InpTrailDist  = 5.0;            // Trailing: SL stays this many points behind price
 
 input group "=== Risk ==="
 input double InpRiskPct    = 0.5;            // Risk per trade, % of balance
