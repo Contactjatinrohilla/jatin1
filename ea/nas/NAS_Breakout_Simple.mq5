@@ -29,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.27"
+#property version   "1.28"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -415,7 +415,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                    |
 //+------------------------------------------------------------------+
-// SL, TP and trail distance: start 2, step 2 whatever the Inputs table shows.
+// SL and TP: start 2, step 2; trail distance: start 5, step 2 - whatever the Inputs table shows.
 // Breakeven and trail start are NOT overridden: the table's Start (5 by default), Step and Stop are used as typed.
 // Tick the "Use ..." switch too (or set it to true) so the optimised value is actually used.
 void Range(const string name, const double start, const double step, const double stop)
@@ -431,8 +431,8 @@ int OnTesterInit()
    Range("InpSL",         2.0, 2.0, 200.0);
    Range("InpFixedTP",    2.0, 2.0, 400.0);
    Range("InpRR",         0.0, 0.5, 5.0);
-   Range("InpTrailDist",  2.0, 2.0, 150.0);
-   Print("Optimisation ranges: SL / TP / trail distance start 2, step 2 (RR 0..5 step 0.5); breakeven and trail start use the Inputs table");
+   Range("InpTrailDist",  5.0, 2.0, 150.0);
+   Print("Optimisation ranges: SL / TP start 2, trail distance start 5, step 2 (RR 0..5 step 0.5); breakeven and trail start use the Inputs table");
    return INIT_SUCCEEDED;
   }
 
