@@ -29,7 +29,7 @@
 //|  Times are SERVER time (Market Watch clock).                      |
 //+------------------------------------------------------------------+
 #property copyright "NAS Breakout Simple"
-#property version   "1.29"
+#property version   "1.30"
 #property description "PDH/PDL breakout + 4H straddle for Nasdaq 100 CFDs. every level traded."
 
 #include <Trade\Trade.mqh>
@@ -415,8 +415,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                    |
 //+------------------------------------------------------------------+
-// SL and TP: start 2, step 2; trail distance: start 5, step 2 - whatever the Inputs table shows.
-// Breakeven and trail start are NOT overridden: the table's Start (5 by default), Step and Stop are used as typed.
+// SL and TP: start 2, step 2 - whatever the Inputs table shows.
+// Breakeven start, trailing start and trailing distance: start 1, step 1 (v1.30).
 // Tick the "Use ..." switch too (or set it to true) so the optimised value is actually used.
 void Range(const string name, const double start, const double step, const double stop)
   {
@@ -431,8 +431,10 @@ int OnTesterInit()
    Range("InpSL",         2.0, 2.0, 200.0);
    Range("InpFixedTP",    2.0, 2.0, 400.0);
    Range("InpRR",         0.0, 0.5, 5.0);
-   Range("InpTrailDist",  5.0, 2.0, 150.0);
-   Print("Optimisation ranges: SL / TP start 2, trail distance start 5, step 2 (RR 0..5 step 0.5); breakeven and trail start use the Inputs table");
+   Range("InpBEAt",       1.0, 1.0, 50.0);             // v1.30: breakeven start 1..50, step 1
+   Range("InpTrailAt",    1.0, 1.0, 50.0);             // trailing start 1..50, step 1
+   Range("InpTrailDist",  1.0, 1.0, 150.0);            // trailing distance 1..150, step 1
+   Print("Optimisation ranges: SL / TP start 2 step 2 (RR 0..5 step 0.5); breakeven start / trailing start 1..50 and trailing distance 1..150, step 1");
    return INIT_SUCCEEDED;
   }
 
