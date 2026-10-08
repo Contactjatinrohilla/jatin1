@@ -16,7 +16,7 @@
 //|  Works on any symbol: all sizes come from the symbol's settings.  |
 //+------------------------------------------------------------------+
 #property copyright "MorningStar_EA"
-#property version   "1.00"
+#property version   "1.01"
 
 #include <Trade\Trade.mqh>
 
@@ -128,6 +128,17 @@ bool PassesSignalRules(int sigShift, int c1Shift)
    return (closeOk && wickOk);
 }
 
+// true when the candles at shifts 1..4 are loaded
+bool CandlesReady()
+{
+   if(Bars(_Symbol, InpTimeframe) < 6)
+      return false;
+   for(int s = 1; s <= 4; s++)
+      if(CandleOpen(s) <= 0 || CandleHigh(s) <= 0 || CandleLow(s) <= 0 || CandleClose(s) <= 0)
+         return false; // candle data not ready yet
+   return true;
+}
+
 // Checks both pattern cases on the latest closed candles.
 // Returns 3 for a 3-candle pattern, 4 for a 4-candle pattern, 0 for none.
 // In both cases the signal candle is shift 1.
@@ -136,11 +147,8 @@ bool PassesSignalRules(int sigShift, int c1Shift)
 int DetectPattern()
 {
    // Make sure enough candle history is loaded (we need shifts 1..4)
-   if(Bars(_Symbol, InpTimeframe) < 6)
+   if(!CandlesReady())
       return 0;
-   for(int s = 1; s <= 4; s++)
-      if(CandleOpen(s) <= 0 || CandleHigh(s) <= 0 || CandleLow(s) <= 0 || CandleClose(s) <= 0)
-         return 0; // candle data not ready yet
 
    // Case A: C1 = shift 3, C2 = shift 2, C3 = shift 1
    if(IsC1Valid(3) && IsC2Valid(2, 3) && PassesSignalRules(1, 3))
@@ -154,6 +162,68 @@ int DetectPattern()
       return 4;
 
    return 0;
+}
+
+//==================================================================
+// JOURNAL EXPLANATIONS - say in the Journal why a pattern did NOT trade.
+// Only printed when C1 is bearish AND C2's low reached C1's low (the
+// pattern had started), so the Journal is not flooded on every candle.
+//==================================================================
+string Px(double price) { return DoubleToString(price, _Digits); }
+
+// Why a candle failed the signal candle rules
+string SignalFailReason(int sigShift, int c1Shift)
+{
+   double range = CandleRange(sigShift);
+   if(range <= 0)
+      return "its range is 0";
+   string why = "";
+   if(CandleClose(sigShift) <= CandleOpen(c1Shift))
+      why = "close " + Px(CandleClose(sigShift)) + " is not above C1 open " + Px(CandleOpen(c1Shift));
+   double wickPct = UpperWick(sigShift) / range * 100.0;
+   if(wickPct > InpMaxUpperWickPct)
+      why += (why == "" ? "" : " and ") + "upper wick is " + DoubleToString(wickPct, 1)
+             + "% of its size (max " + DoubleToString(InpMaxUpperWickPct, 1) + "%)";
+   return why;
+}
+
+// Why one case failed. c1Shift = 3 for the 3-candle case, 4 for the 4-candle case.
+string WhyCaseFailed(int c1Shift)
+{
+   int c2 = c1Shift - 1;
+   int c3 = c1Shift - 2;
+   if(!IsInsideC1Range(CandleClose(c2), c1Shift))
+      return "C2 close " + Px(CandleClose(c2)) + " is outside C1 range "
+             + Px(CandleLow(c1Shift)) + " - " + Px(CandleHigh(c1Shift));
+
+   if(c1Shift == 3) // C3 is the last closed candle
+   {
+      string why = "C3 failed: " + SignalFailReason(c3, c1Shift);
+      if(IsInsideC1Range(CandleClose(c3), c1Shift))
+         why += " -> C3 closed inside C1 range, C4 will be checked on the next candle";
+      else
+         why += " -> C3 closed outside C1 range, pattern cancelled";
+      return why;
+   }
+
+   // 4-candle case: C3 = shift 2, C4 = shift 1
+   if(PassesSignalRules(c3, c1Shift))
+      return "C3 already gave the signal one candle ago (3-candle pattern)";
+   if(!IsInsideC1Range(CandleClose(c3), c1Shift))
+      return "C3 close " + Px(CandleClose(c3)) + " was outside C1 range, pattern was cancelled";
+   return "C4 failed: " + SignalFailReason(1, c1Shift) + " -> pattern cancelled";
+}
+
+void ExplainNoPattern()
+{
+   if(!CandlesReady())
+      return;
+   if(IsC1Valid(3) && CandleLow(2) <= CandleLow(3) + InpEqualTolerance)
+      Print(EA_NAME, ": no 3-candle BUY (C1 = ", TimeToString(iTime(_Symbol, InpTimeframe, 3)),
+            "): ", WhyCaseFailed(3));
+   if(IsC1Valid(4) && CandleLow(3) <= CandleLow(4) + InpEqualTolerance)
+      Print(EA_NAME, ": no 4-candle BUY (C1 = ", TimeToString(iTime(_Symbol, InpTimeframe, 4)),
+            "): ", WhyCaseFailed(4));
 }
 
 //==================================================================
@@ -490,6 +560,12 @@ int OnInit()
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
 
+   // The EA reads candles from InpTimeframe, NOT from the chart. Warn if they differ.
+   if(PeriodSeconds(InpTimeframe) != PeriodSeconds(_Period))
+      Print(EA_NAME, ": NOTE - pattern timeframe is ", EnumToString(InpTimeframe),
+            " but the chart is ", EnumToString(_Period),
+            ". The EA trades patterns on ", EnumToString(InpTimeframe), " candles only.");
+
    // Save the current candle time so an old signal is not traded on attach
    g_lastBarTime = iTime(_Symbol, InpTimeframe, 0);
 
@@ -523,15 +599,17 @@ void OnTick()
    // 2. Pattern is checked only once, on the first tick of a new candle
    if(IsNewBar())
    {
-      bool blocked = InpUseLossLimits && (g_dailyHit || g_weeklyHit);
-
-      // Only one open trade at a time; ignore signals while a trade is open
-      if(!blocked && !HasOpenTrade())
-      {
-         int patternType = DetectPattern();
-         if(patternType > 0)
-            OpenBuy(patternType);
-      }
+      int patternType = DetectPattern();
+      if(patternType == 0)
+         ExplainNoPattern();               // Journal note if a pattern started but failed
+      else if(InpUseLossLimits && g_weeklyHit)
+         Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - weekly loss limit hit.");
+      else if(InpUseLossLimits && g_dailyHit)
+         Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - daily loss limit hit.");
+      else if(HasOpenTrade())              // only one open trade at a time
+         Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - a trade from this EA is already open.");
+      else
+         OpenBuy(patternType);
    }
 
    // 3. Refresh the on-chart text
