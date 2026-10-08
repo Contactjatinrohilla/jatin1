@@ -13,10 +13,12 @@
 //|                                                                  |
 //|  Stop loss below the signal candle, lot size from a dollar risk,  |
 //|  take profit = risk x RR. Daily / weekly prop-firm loss limits.   |
+//|  Optional TP1 / TP2: close a % of the position at risk x TP1 RR   |
+//|  and risk x TP2 RR; the rest runs to the final take profit.       |
 //|  Works on any symbol: all sizes come from the symbol's settings.  |
 //+------------------------------------------------------------------+
 #property copyright "MorningStar_EA"
-#property version   "1.01"
+#property version   "1.02"
 
 #include <Trade\Trade.mqh>
 
@@ -33,6 +35,12 @@ input double          InpRiskUSD         = 100;        // Dollars lost if stop l
 input double          InpRR              = 2.0;        // Take profit = risk x this number
 input double          InpSLBufferPct     = 10;         // SL below signal candle low, % of its size
 input double          InpMaxLots         = 5.0;        // Safety cap on lot size
+
+input group "Partial take profits (TP1 / TP2)"
+input double          InpTP1_RR          = 1.0;        // TP1 level = risk x this number (0 = TP1 off)
+input double          InpTP1_ClosePct    = 50;         // % of the ORIGINAL lots closed at TP1
+input double          InpTP2_RR          = 1.5;        // TP2 level = risk x this number (0 = TP2 off)
+input double          InpTP2_ClosePct    = 25;         // % of the ORIGINAL lots closed at TP2
 
 input group "Prop firm limits"
 input bool            InpUseLossLimits   = true;       // Use the daily / weekly loss limits
@@ -56,6 +64,11 @@ double   g_weekStartBal  = 0;     // Account balance at the start of the week
 
 bool     g_dailyHit      = false; // true = daily limit hit, no new trades until next day
 bool     g_weeklyHit     = false; // true = weekly limit hit, no new trades until next Monday
+
+ulong    g_origTicket    = 0;     // Position whose original lot size is remembered below
+double   g_origLots      = 0;     // Lot size the position was opened with
+ulong    g_warnTicket    = 0;     // Position + level of the last "lots too small" message
+string   g_warnLevel     = "";    // (so that message is printed only once)
 
 const string EA_NAME     = "MorningStar_EA";
 
@@ -516,8 +529,129 @@ void OpenBuy(int patternType)
          " | entry ", DoubleToString(entry, _Digits),
          " | SL ",    DoubleToString(sl, _Digits),
          " | TP ",    DoubleToString(tp, _Digits),
+         " | TP1 ",   (InpTP1_RR > 0 && InpTP1_ClosePct > 0) ? DoubleToString(entry + (entry - sl) * InpTP1_RR, _Digits) : "off",
+         " | TP2 ",   (InpTP2_RR > 0 && InpTP2_ClosePct > 0) ? DoubleToString(entry + (entry - sl) * InpTP2_RR, _Digits) : "off",
          " | lots ",  DoubleToString(lots, StepDigits(step)),
          " | risk $", DoubleToString(lots * lossPerLot, 2));
+}
+
+//==================================================================
+// PARTIAL TAKE PROFITS (TP1 / TP2)
+// Checked on every tick. Nothing is stored between restarts: the EA works
+// out what is already done by comparing the position's current lots with
+// the lots it was opened with (read from the trade history).
+//   TP1 price = entry + risk x InpTP1_RR -> closed lots brought up to TP1 %
+//   TP2 price = entry + risk x InpTP2_RR -> closed lots brought up to TP1 % + TP2 %
+//   The rest stays open until the final TP (InpRR) or the stop loss.
+// "risk" = entry price - stop loss price (the SL is never moved by this EA).
+//==================================================================
+
+// Lot size the position was opened with (from history, remembered per position)
+double OriginalLots(ulong ticket, double currentLots)
+{
+   if(ticket == g_origTicket && g_origLots > 0)
+      return g_origLots;
+
+   double lots = currentLots;   // fallback if history cannot be read
+   long   posId = PositionGetInteger(POSITION_IDENTIFIER);
+   if(HistorySelectByPosition(posId))
+   {
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+      {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal > 0 && (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
+         {
+            lots = HistoryDealGetDouble(deal, DEAL_VOLUME);
+            break;
+         }
+      }
+   }
+   g_origTicket = ticket;
+   g_origLots   = lots;
+   return lots;
+}
+
+// Round a lot size DOWN to the symbol's lot step
+double FloorToStep(double lots)
+{
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0)
+      return lots;
+   return NormalizeDouble(MathFloor(lots / step + 1e-9) * step, StepDigits(step));
+}
+
+void ManagePartialTPs()
+{
+   bool tp1On = (InpTP1_RR > 0 && InpTP1_ClosePct > 0);
+   bool tp2On = (InpTP2_RR > 0 && InpTP2_ClosePct > 0);
+   if(!tp1On && !tp2On)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol
+         || PositionGetInteger(POSITION_MAGIC) != InpMagic
+         || PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
+         continue;
+
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double lots  = PositionGetDouble(POSITION_VOLUME);
+      double risk  = entry - sl;
+      if(sl <= 0 || risk <= 0)
+         continue;                               // no usable stop loss -> cannot place TP levels
+
+      double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double orig    = OriginalLots(ticket, lots);
+      double closed  = orig - lots;              // lots already closed
+      double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double eps     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP) / 2.0;
+
+      // Total lots that should be closed by now, based on how far price has gone.
+      // If price jumps past both levels at once, both portions are closed together.
+      bool   hit1   = tp1On && bid >= entry + risk * InpTP1_RR;
+      bool   hit2   = tp2On && bid >= entry + risk * InpTP2_RR;
+      if(!hit1 && !hit2)
+         continue;
+      double target = (hit1 ? orig * InpTP1_ClosePct / 100.0 : 0)
+                    + (hit2 ? orig * InpTP2_ClosePct / 100.0 : 0);
+      string level  = hit2 ? "TP2" : "TP1";
+
+      double toClose = FloorToStep(target - closed);
+      if(toClose < eps)
+         continue;                               // this level's part is already closed
+
+      if(toClose < minLot - 1e-9)
+      {
+         // Print only once per position and level, not on every tick
+         if(g_warnTicket != ticket || g_warnLevel != level)
+         {
+            Print(EA_NAME, ": ", level, " reached but ", DoubleToString(toClose, 4),
+                  " lots is below the broker minimum ", DoubleToString(minLot, 4),
+                  " - nothing closed. Use a bigger position or a bigger close %.");
+            g_warnTicket = ticket;
+            g_warnLevel  = level;
+         }
+         continue;
+      }
+
+      // ASSUMPTION: if what would remain is smaller than the broker's minimum
+      // lot, the whole position is closed instead.
+      if(lots - toClose < minLot - 1e-9)
+         toClose = lots;
+
+      bool ok = (toClose >= lots) ? g_trade.PositionClose(ticket)
+                                  : g_trade.PositionClosePartial(ticket, toClose);
+      if(ok)
+         Print(EA_NAME, ": ", level, " hit at ", Px(bid), " - closed ",
+               DoubleToString(toClose, 2), " of ", DoubleToString(orig, 2), " lots.");
+      else
+         Print(EA_NAME, ": ", level, " partial close failed (retcode ", g_trade.ResultRetcode(), " ",
+               g_trade.ResultRetcodeDescription(), "). Will retry on the next tick.");
+   }
 }
 
 //==================================================================
@@ -537,6 +671,8 @@ void UpdateDisplay()
    Comment(EA_NAME, "\n",
            "Symbol: ",    _Symbol, "   Timeframe: ", EnumToString(InpTimeframe), "\n",
            "Risk: $",     DoubleToString(InpRiskUSD, 2), "   RR: ", DoubleToString(InpRR, 2), "\n",
+           "TP1: ", DoubleToString(InpTP1_ClosePct, 0), "% at ", DoubleToString(InpTP1_RR, 2), "R   ",
+           "TP2: ", DoubleToString(InpTP2_ClosePct, 0), "% at ", DoubleToString(InpTP2_RR, 2), "R\n",
            "Daily loss used: $",  DoubleToString(DailyLossUsed(), 2),
            " of $",               DoubleToString(DailyLossLimit(), 2), limitsNote, "\n",
            "Weekly loss used: $", DoubleToString(WeeklyLossUsed(), 2),
@@ -556,6 +692,18 @@ int OnInit()
             " is not allowed. Use M1 up to H4.");
       return INIT_PARAMETERS_INCORRECT;
    }
+
+   // TP1 + TP2 cannot close more than the whole position
+   if(InpTP1_ClosePct < 0 || InpTP2_ClosePct < 0 || InpTP1_ClosePct + InpTP2_ClosePct > 100)
+   {
+      Alert(EA_NAME, ": TP1 % + TP2 % must be between 0 and 100.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(InpTP1_RR > 0 && InpTP2_RR > 0 && InpTP2_RR <= InpTP1_RR)
+      Print(EA_NAME, ": NOTE - TP2 RR (", InpTP2_RR, ") is not above TP1 RR (", InpTP1_RR, ").");
+   if((InpTP1_RR >= InpRR) || (InpTP2_RR >= InpRR))
+      Print(EA_NAME, ": NOTE - a TP1/TP2 level is at or beyond the final TP (RR ", InpRR,
+            "), so it will never be reached before the final TP closes the trade.");
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
@@ -595,6 +743,9 @@ void OnTick()
 {
    // 1. Loss limits are checked on every tick
    CheckLossLimits();
+
+   // 1b. Partial take profits (TP1 / TP2) are checked on every tick
+   ManagePartialTPs();
 
    // 2. Pattern is checked only once, on the first tick of a new candle
    if(IsNewBar())
