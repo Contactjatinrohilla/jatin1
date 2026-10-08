@@ -1,0 +1,540 @@
+//+------------------------------------------------------------------+
+//|                                             MorningStar_EA.mq5    |
+//|                                                                  |
+//|  Looks for a 3-candle (or 4-candle) buying pattern on CLOSED      |
+//|  candles of the chosen timeframe and opens one market BUY when    |
+//|  the pattern completes.                                           |
+//|                                                                  |
+//|  C1 = bearish candle.                                             |
+//|  C2 = low at/below C1's low, close inside C1's range.             |
+//|  C3 = signal candle (close above C1's open, small upper wick)     |
+//|       -> BUY. If C3 fails but closes inside C1's range, C4 gets   |
+//|       one chance to be the signal candle. Never a 5th candle.     |
+//|                                                                  |
+//|  Stop loss below the signal candle, lot size from a dollar risk,  |
+//|  take profit = risk x RR. Daily / weekly prop-firm loss limits.   |
+//|  Works on any symbol: all sizes come from the symbol's settings.  |
+//+------------------------------------------------------------------+
+#property copyright "MorningStar_EA"
+#property version   "1.00"
+
+#include <Trade\Trade.mqh>
+
+//==================================================================
+// INPUTS - the settings you can change in the EA window
+//==================================================================
+input group "Pattern"
+input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M15; // Timeframe to look for the pattern on (M1 up to H4)
+input double          InpEqualTolerance  = 0;          // How close C2's low must be to C1's low to count as "equal" (price)
+input double          InpMaxUpperWickPct = 30;         // Max upper wick of signal candle, % of its size
+
+input group "Risk"
+input double          InpRiskUSD         = 100;        // Dollars lost if stop loss is hit
+input double          InpRR              = 2.0;        // Take profit = risk x this number
+input double          InpSLBufferPct     = 10;         // SL below signal candle low, % of its size
+input double          InpMaxLots         = 5.0;        // Safety cap on lot size
+
+input group "Prop firm limits"
+input bool            InpUseLossLimits   = true;       // Use the daily / weekly loss limits
+input double          InpDailyLossPct    = 2.5;        // Daily loss limit, % of start-of-day balance
+input double          InpWeeklyLossPct   = 8.5;        // Weekly loss limit, % of start-of-week balance
+
+input group "Other"
+input long            InpMagic           = 880088;     // ID number that marks this EA's trades
+
+//==================================================================
+// GLOBAL VARIABLES - things the EA remembers between ticks
+//==================================================================
+CTrade   g_trade;                 // Helper object that sends orders
+
+datetime g_lastBarTime   = 0;     // Open time of the newest candle we have already handled
+
+datetime g_dayStart      = 0;     // Server time when the current day started (00:00)
+datetime g_weekStart     = 0;     // Server time when the current week started (Monday 00:00)
+double   g_dayStartBal   = 0;     // Account balance at the start of the day
+double   g_weekStartBal  = 0;     // Account balance at the start of the week
+
+bool     g_dailyHit      = false; // true = daily limit hit, no new trades until next day
+bool     g_weeklyHit     = false; // true = weekly limit hit, no new trades until next Monday
+
+const string EA_NAME     = "MorningStar_EA";
+
+//==================================================================
+// CANDLE HELPERS - read one candle on the chosen timeframe
+// "shift" 1 = the most recently CLOSED candle, 2 = the one before...
+//==================================================================
+double CandleOpen(int shift)  { return iOpen (_Symbol, InpTimeframe, shift); }
+double CandleHigh(int shift)  { return iHigh (_Symbol, InpTimeframe, shift); }
+double CandleLow(int shift)   { return iLow  (_Symbol, InpTimeframe, shift); }
+double CandleClose(int shift) { return iClose(_Symbol, InpTimeframe, shift); }
+
+// Range = High - Low
+double CandleRange(int shift) { return CandleHigh(shift) - CandleLow(shift); }
+
+// Upper wick = High - the higher of Open/Close
+double UpperWick(int shift)
+{
+   return CandleHigh(shift) - MathMax(CandleOpen(shift), CandleClose(shift));
+}
+
+// Lower wick = the lower of Open/Close - Low (not used by any rule,
+// kept here so the definition is easy to find if a rule needs it later)
+double LowerWick(int shift)
+{
+   return MathMin(CandleOpen(shift), CandleClose(shift)) - CandleLow(shift);
+}
+
+// Bearish candle = Close below Open
+bool IsBearish(int shift) { return CandleClose(shift) < CandleOpen(shift); }
+
+//==================================================================
+// PATTERN RULES - each rule in its own small function
+//==================================================================
+
+// Is a price inside C1's range? (C1.Low <= price <= C1.High)
+bool IsInsideC1Range(double price, int c1Shift)
+{
+   return (price >= CandleLow(c1Shift) && price <= CandleHigh(c1Shift));
+}
+
+// Candle 1: must be bearish. Its size does not matter.
+bool IsC1Valid(int c1Shift)
+{
+   return IsBearish(c1Shift);
+}
+
+// Candle 2: low at or below C1's low (with tolerance) AND close inside C1's range.
+// It may be bullish or bearish.
+bool IsC2Valid(int c2Shift, int c1Shift)
+{
+   bool lowOk   = CandleLow(c2Shift) <= CandleLow(c1Shift) + InpEqualTolerance;
+   bool closeOk = IsInsideC1Range(CandleClose(c2Shift), c1Shift);
+   return (lowOk && closeOk);
+}
+
+// Signal candle (C3 or C4):
+//   - Close must be ABOVE C1's open
+//   - Upper wick must be <= InpMaxUpperWickPct % of the candle's range
+//   - A candle with zero range fails
+//   - The lower wick can be any size
+bool PassesSignalRules(int sigShift, int c1Shift)
+{
+   double range = CandleRange(sigShift);
+   if(range <= 0)
+      return false;
+
+   bool closeOk = CandleClose(sigShift) > CandleOpen(c1Shift);
+   bool wickOk  = UpperWick(sigShift) <= (InpMaxUpperWickPct / 100.0) * range;
+   return (closeOk && wickOk);
+}
+
+// Checks both pattern cases on the latest closed candles.
+// Returns 3 for a 3-candle pattern, 4 for a 4-candle pattern, 0 for none.
+// In both cases the signal candle is shift 1.
+// ASSUMPTION: if Case A and Case B are both true on the same bar, only ONE
+// BUY is placed and it is reported as a 3-candle pattern (Case A is checked first).
+int DetectPattern()
+{
+   // Make sure enough candle history is loaded (we need shifts 1..4)
+   if(Bars(_Symbol, InpTimeframe) < 6)
+      return 0;
+   for(int s = 1; s <= 4; s++)
+      if(CandleOpen(s) <= 0 || CandleHigh(s) <= 0 || CandleLow(s) <= 0 || CandleClose(s) <= 0)
+         return 0; // candle data not ready yet
+
+   // Case A: C1 = shift 3, C2 = shift 2, C3 = shift 1
+   if(IsC1Valid(3) && IsC2Valid(2, 3) && PassesSignalRules(1, 3))
+      return 3;
+
+   // Case B: C1 = shift 4, C2 = shift 3, C3 = shift 2, C4 = shift 1
+   if(IsC1Valid(4) && IsC2Valid(3, 4)
+      && !PassesSignalRules(2, 4)                 // C3 did NOT give the signal
+      && IsInsideC1Range(CandleClose(2), 4)       // C3 closed inside C1's range (pattern still alive)
+      && PassesSignalRules(1, 4))                 // C4 gives the signal
+      return 4;
+
+   return 0;
+}
+
+//==================================================================
+// NEW CANDLE DETECTION - true only once, on the first tick of a new candle
+//==================================================================
+bool IsNewBar()
+{
+   datetime barTime = iTime(_Symbol, InpTimeframe, 0);
+   if(barTime == 0)
+      return false;              // data not ready yet
+
+   // If no time was saved on attach (data was not ready), save it now
+   // and do NOT treat it as a new candle, so an old signal is never traded.
+   if(g_lastBarTime == 0)
+   {
+      g_lastBarTime = barTime;
+      return false;
+   }
+
+   if(barTime != g_lastBarTime)
+   {
+      g_lastBarTime = barTime;
+      return true;
+   }
+   return false;
+}
+
+//==================================================================
+// OPEN TRADE CHECKS - find / close this EA's trades on this symbol
+//==================================================================
+bool HasOpenTrade()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol
+         && PositionGetInteger(POSITION_MAGIC) == InpMagic)
+         return true;
+   }
+   return false;
+}
+
+// Closes all of this EA's trades. If a close fails (for example the
+// market is closed) the trade is left open and the next tick tries again.
+void CloseAllEATrades()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol
+         || PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      if(!g_trade.PositionClose(ticket))
+         Print(EA_NAME, ": could not close trade #", ticket, " (retcode ",
+               g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription(),
+               "). Will retry on the next tick.");
+   }
+}
+
+//==================================================================
+// PROP FIRM LOSS LIMITS
+//==================================================================
+
+// Balance at a past moment, rebuilt from the trade history so it is
+// correct even after MT5 restarts:
+//   start balance = current balance - (profit + swap + commission + fee)
+//                   of all BUY/SELL deals since that moment.
+// Only DEAL_TYPE_BUY and DEAL_TYPE_SELL deals count, so deposits and
+// withdrawals are ignored.
+// ASSUMPTION: deals of ALL symbols and ALL EAs are counted, because the
+// prop-firm limit is on the whole account balance. Opening deals are also
+// counted (their profit is 0, but their commission already left the balance).
+double BalanceAt(datetime fromTime)
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(!HistorySelect(fromTime, TimeCurrent() + 86400))
+      return balance;
+
+   double sum   = 0;
+   int    total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if((datetime)HistoryDealGetInteger(ticket, DEAL_TIME) < fromTime)
+         continue;
+
+      ENUM_DEAL_TYPE type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+
+      sum += HistoryDealGetDouble(ticket, DEAL_PROFIT)
+           + HistoryDealGetDouble(ticket, DEAL_SWAP)
+           + HistoryDealGetDouble(ticket, DEAL_COMMISSION)
+           + HistoryDealGetDouble(ticket, DEAL_FEE);
+   }
+   return balance - sum;
+}
+
+// Works out the start of the current server day and week. When a new day
+// (or week) begins, the start balance is recalculated and the "limit hit"
+// flag for that period is cleared. The start balance does not change during
+// the day, so it is only calculated when the day/week changes (and on attach).
+void UpdateStartBalances()
+{
+   datetime now      = TimeCurrent();
+   datetime dayStart = now - (now % 86400);           // today 00:00 server time
+
+   MqlDateTime dt;
+   TimeToStruct(dayStart, dt);
+   int daysSinceMonday = (dt.day_of_week + 6) % 7;     // Monday=0 ... Sunday=6
+   datetime weekStart  = dayStart - daysSinceMonday * 86400;
+
+   if(dayStart != g_dayStart)
+   {
+      g_dayStart    = dayStart;
+      g_dayStartBal = BalanceAt(dayStart);
+      g_dailyHit    = false;                          // new server day: trading allowed again
+   }
+   if(weekStart != g_weekStart)
+   {
+      g_weekStart    = weekStart;
+      g_weekStartBal = BalanceAt(weekStart);
+      g_weeklyHit    = false;                         // new week: trading allowed again
+   }
+}
+
+// Money lost so far today / this week (0 if in profit)
+double DailyLossUsed()  { return MathMax(0.0, g_dayStartBal  - AccountInfoDouble(ACCOUNT_EQUITY)); }
+double WeeklyLossUsed() { return MathMax(0.0, g_weekStartBal - AccountInfoDouble(ACCOUNT_EQUITY)); }
+double DailyLossLimit() { return g_dayStartBal  * InpDailyLossPct  / 100.0; }
+double WeeklyLossLimit(){ return g_weekStartBal * InpWeeklyLossPct / 100.0; }
+
+// Runs on EVERY tick. If a limit is reached: Alert once, close all of this
+// EA's trades (retrying on later ticks if needed) and block new trades.
+void CheckLossLimits()
+{
+   UpdateStartBalances();
+   if(!InpUseLossLimits)
+      return;
+
+   if(!g_dailyHit && DailyLossLimit() > 0 && DailyLossUsed() >= DailyLossLimit())
+   {
+      g_dailyHit = true;
+      Alert(EA_NAME, " ", _Symbol, ": DAILY LOSS LIMIT HIT (",
+            DoubleToString(DailyLossUsed(), 2), " of ", DoubleToString(DailyLossLimit(), 2),
+            "). Closing trades. No new trades until the next server day.");
+   }
+   if(!g_weeklyHit && WeeklyLossLimit() > 0 && WeeklyLossUsed() >= WeeklyLossLimit())
+   {
+      g_weeklyHit = true;
+      Alert(EA_NAME, " ", _Symbol, ": WEEKLY LOSS LIMIT HIT (",
+            DoubleToString(WeeklyLossUsed(), 2), " of ", DoubleToString(WeeklyLossLimit(), 2),
+            "). Closing trades. No new trades until next Monday.");
+   }
+
+   // While a limit is active, keep closing any of our trades still open
+   if((g_dailyHit || g_weeklyHit) && HasOpenTrade())
+      CloseAllEATrades();
+}
+
+//==================================================================
+// PRICE / LOT ROUNDING HELPERS
+//==================================================================
+
+// Round a price to the nearest allowed tick
+double RoundToTick(double price, double tickSize)
+{
+   return NormalizeDouble(MathRound(price / tickSize) * tickSize, _Digits);
+}
+
+// Number of decimals in the lot step (0.01 -> 2, 0.1 -> 1, 1 -> 0)
+int StepDigits(double step)
+{
+   int    digits = 0;
+   double s      = step;
+   while(digits < 8 && MathAbs(s - MathRound(s)) > 1e-9)
+   {
+      s *= 10.0;
+      digits++;
+   }
+   return digits;
+}
+
+//==================================================================
+// TRADE PLACEMENT - one market BUY, signal candle = shift 1
+//==================================================================
+void OpenBuy(int patternType)
+{
+   const int sig = 1; // the signal candle is always the last closed candle
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0)
+   {
+      Print(EA_NAME, ": trade skipped - no valid price available.");
+      return;
+   }
+   double ask = tick.ask;
+   double bid = tick.bid;
+
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0)
+      tickSize = _Point;   // ASSUMPTION: fall back to the point size if the broker reports 0
+
+   // --- Stop loss: below the signal candle's low by a % of its size
+   double range = CandleRange(sig);
+   double sl    = CandleLow(sig) - (InpSLBufferPct / 100.0) * range;
+   sl = RoundToTick(sl, tickSize);
+
+   double slDist = ask - sl;
+   if(slDist <= 0)
+   {
+      Print(EA_NAME, ": trade skipped - stop loss (", DoubleToString(sl, _Digits),
+            ") is not below the Ask price (", DoubleToString(ask, _Digits), ").");
+      return;
+   }
+
+   // --- Lot size from the dollar risk
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tickValue <= 0)
+      tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue <= 0)
+   {
+      Print(EA_NAME, ": trade skipped - broker reports a tick value of 0, cannot size the trade.");
+      return;
+   }
+
+   double lossPerLot = (slDist / tickSize) * tickValue;   // money lost per 1 lot if SL is hit
+   double lots       = InpRiskUSD / lossPerLot;
+
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0)
+      step = minLot;       // ASSUMPTION: if the broker reports no lot step, use the minimum lot
+
+   // Cap first, then round DOWN to the lot step (so the cap is never exceeded)
+   lots = MathMin(lots, InpMaxLots);
+   if(maxLot > 0)
+      lots = MathMin(lots, maxLot);
+   if(step > 0)
+      lots = MathFloor(lots / step + 1e-9) * step;     // tiny 1e-9 avoids 0.3 becoming 0.29999
+   lots = NormalizeDouble(lots, StepDigits(step));
+
+   if(lots < minLot || lots <= 0)
+   {
+      Print(EA_NAME, ": trade skipped - calculated lot size ", DoubleToString(lots, 4),
+            " is below the broker minimum ", DoubleToString(minLot, 4),
+            ". Risk $", DoubleToString(InpRiskUSD, 2), " is too small for a stop of ",
+            DoubleToString(slDist, _Digits), " (1 lot would lose ", DoubleToString(lossPerLot, 2), ").");
+      return;
+   }
+
+   // --- Take profit: risk distance x RR above the Ask
+   double tp = RoundToTick(ask + slDist * InpRR, tickSize);
+
+   // --- Broker minimum stop distance
+   // ASSUMPTION: the broker measures a BUY's SL from Bid and TP from Ask/Bid,
+   // so we use the SMALLER distance for each (SL from Bid, TP from Ask) to be safe.
+   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double slGap   = MathMin(ask, bid) - sl;
+   double tpGap   = tp - MathMax(ask, bid);
+   if(slGap < minDist || tpGap < minDist || tpGap <= 0)
+   {
+      Print(EA_NAME, ": trade skipped - SL or TP is too close to price. SL gap ",
+            DoubleToString(slGap, _Digits), ", TP gap ", DoubleToString(tpGap, _Digits),
+            ", broker minimum ", DoubleToString(minDist, _Digits), ".");
+      return;
+   }
+
+   // --- Send the market BUY
+   if(!g_trade.Buy(lots, _Symbol, ask, sl, tp, "MS"))
+   {
+      Print(EA_NAME, ": BUY failed - retcode ", g_trade.ResultRetcode(), " ",
+            g_trade.ResultRetcodeDescription());
+      return;
+   }
+
+   double entry = g_trade.ResultPrice();
+   if(entry <= 0)
+      entry = ask;
+
+   Print(EA_NAME, ": BUY opened | ", patternType, "-candle pattern",
+         " | entry ", DoubleToString(entry, _Digits),
+         " | SL ",    DoubleToString(sl, _Digits),
+         " | TP ",    DoubleToString(tp, _Digits),
+         " | lots ",  DoubleToString(lots, StepDigits(step)),
+         " | risk $", DoubleToString(lots * lossPerLot, 2));
+}
+
+//==================================================================
+// CHART DISPLAY - text in the top-left corner
+//==================================================================
+void UpdateDisplay()
+{
+   string status;
+   if(g_weeklyHit)          status = "WEEKLY LIMIT HIT";
+   else if(g_dailyHit)      status = "DAILY LIMIT HIT";
+   else if(HasOpenTrade())  status = "Trade open";
+   else                     status = "Waiting for pattern";
+
+   string limitsNote = InpUseLossLimits ? "" : "  (limits OFF)";
+
+   // Note: amounts are in the account currency (the spec calls them "$")
+   Comment(EA_NAME, "\n",
+           "Symbol: ",    _Symbol, "   Timeframe: ", EnumToString(InpTimeframe), "\n",
+           "Risk: $",     DoubleToString(InpRiskUSD, 2), "   RR: ", DoubleToString(InpRR, 2), "\n",
+           "Daily loss used: $",  DoubleToString(DailyLossUsed(), 2),
+           " of $",               DoubleToString(DailyLossLimit(), 2), limitsNote, "\n",
+           "Weekly loss used: $", DoubleToString(WeeklyLossUsed(), 2),
+           " of $",               DoubleToString(WeeklyLossLimit(), 2), limitsNote, "\n",
+           "Status: ", status);
+}
+
+//==================================================================
+// EA START
+//==================================================================
+int OnInit()
+{
+   // Only timeframes from M1 up to H4 are allowed
+   if(PeriodSeconds(InpTimeframe) > 4 * 3600)
+   {
+      Alert(EA_NAME, ": timeframe ", EnumToString(InpTimeframe),
+            " is not allowed. Use M1 up to H4.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   g_trade.SetExpertMagicNumber((ulong)InpMagic);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+
+   // Save the current candle time so an old signal is not traded on attach
+   g_lastBarTime = iTime(_Symbol, InpTimeframe, 0);
+
+   // Rebuild start-of-day / start-of-week balance from history
+   g_dayStart  = 0;
+   g_weekStart = 0;
+   g_dailyHit  = false;
+   g_weeklyHit = false;
+   UpdateStartBalances();
+
+   UpdateDisplay();
+   return INIT_SUCCEEDED;
+}
+
+//==================================================================
+// EA STOP
+//==================================================================
+void OnDeinit(const int reason)
+{
+   Comment("");
+}
+
+//==================================================================
+// EVERY TICK
+//==================================================================
+void OnTick()
+{
+   // 1. Loss limits are checked on every tick
+   CheckLossLimits();
+
+   // 2. Pattern is checked only once, on the first tick of a new candle
+   if(IsNewBar())
+   {
+      bool blocked = InpUseLossLimits && (g_dailyHit || g_weeklyHit);
+
+      // Only one open trade at a time; ignore signals while a trade is open
+      if(!blocked && !HasOpenTrade())
+      {
+         int patternType = DetectPattern();
+         if(patternType > 0)
+            OpenBuy(patternType);
+      }
+   }
+
+   // 3. Refresh the on-chart text
+   UpdateDisplay();
+}
+//+------------------------------------------------------------------+
