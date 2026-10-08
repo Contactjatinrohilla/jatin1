@@ -18,7 +18,7 @@
 //|  Works on any symbol: all sizes come from the symbol's settings.  |
 //+------------------------------------------------------------------+
 #property copyright "MorningStar_EA"
-#property version   "1.02"
+#property version   "1.03"
 
 #include <Trade\Trade.mqh>
 
@@ -46,6 +46,7 @@ input group "Prop firm limits"
 input bool            InpUseLossLimits   = true;       // Use the daily / weekly loss limits
 input double          InpDailyLossPct    = 2.5;        // Daily loss limit, % of start-of-day balance
 input double          InpWeeklyLossPct   = 8.5;        // Weekly loss limit, % of start-of-week balance
+input int             InpMaxTradesPerDay = 2;          // Max new trades per server day (0 = no limit)
 
 input group "Other"
 input long            InpMagic           = 880088;     // ID number that marks this EA's trades
@@ -69,6 +70,8 @@ ulong    g_origTicket    = 0;     // Position whose original lot size is remembe
 double   g_origLots      = 0;     // Lot size the position was opened with
 ulong    g_warnTicket    = 0;     // Position + level of the last "lots too small" message
 string   g_warnLevel     = "";    // (so that message is printed only once)
+
+int      g_tradesToday   = 0;     // Trades this EA opened on this symbol today (server day)
 
 const string EA_NAME     = "MorningStar_EA";
 
@@ -361,6 +364,7 @@ void UpdateStartBalances()
       g_dayStart    = dayStart;
       g_dayStartBal = BalanceAt(dayStart);
       g_dailyHit    = false;                          // new server day: trading allowed again
+      g_tradesToday = CountTradesToday();             // rebuilt from history (restart-safe)
    }
    if(weekStart != g_weekStart)
    {
@@ -368,6 +372,38 @@ void UpdateStartBalances()
       g_weekStartBal = BalanceAt(weekStart);
       g_weeklyHit    = false;                         // new week: trading allowed again
    }
+}
+
+// Number of trades this EA opened on this symbol since the start of the
+// server day. Read from the trade history so it stays correct after a restart.
+// Only OPENING deals count (a TP1/TP2 partial close is not a new trade).
+int CountTradesToday()
+{
+   if(!HistorySelect(g_dayStart, TimeCurrent() + 86400))
+      return g_tradesToday;
+
+   int count = 0;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      if((datetime)HistoryDealGetInteger(deal, DEAL_TIME) < g_dayStart)
+         continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol
+         || HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic)
+         continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
+         count++;
+   }
+   return count;
+}
+
+// true when today's trade limit is used up
+bool TradeLimitReached()
+{
+   return (InpMaxTradesPerDay > 0 && g_tradesToday >= InpMaxTradesPerDay);
 }
 
 // Money lost so far today / this week (0 if in profit)
@@ -521,6 +557,8 @@ void OpenBuy(int patternType)
       return;
    }
 
+   g_tradesToday++;                                   // counts toward the daily trade limit
+
    double entry = g_trade.ResultPrice();
    if(entry <= 0)
       entry = ask;
@@ -663,7 +701,10 @@ void UpdateDisplay()
    if(g_weeklyHit)          status = "WEEKLY LIMIT HIT";
    else if(g_dailyHit)      status = "DAILY LIMIT HIT";
    else if(HasOpenTrade())  status = "Trade open";
+   else if(TradeLimitReached()) status = "DAILY TRADE LIMIT REACHED";
    else                     status = "Waiting for pattern";
+
+   string tradesMax = (InpMaxTradesPerDay > 0) ? IntegerToString(InpMaxTradesPerDay) : "no limit";
 
    string limitsNote = InpUseLossLimits ? "" : "  (limits OFF)";
 
@@ -677,6 +718,7 @@ void UpdateDisplay()
            " of $",               DoubleToString(DailyLossLimit(), 2), limitsNote, "\n",
            "Weekly loss used: $", DoubleToString(WeeklyLossUsed(), 2),
            " of $",               DoubleToString(WeeklyLossLimit(), 2), limitsNote, "\n",
+           "Trades today: ", g_tradesToday, " of ", tradesMax, "\n",
            "Status: ", status);
 }
 
@@ -757,6 +799,9 @@ void OnTick()
          Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - weekly loss limit hit.");
       else if(InpUseLossLimits && g_dailyHit)
          Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - daily loss limit hit.");
+      else if(TradeLimitReached())
+         Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - daily trade limit reached (",
+               g_tradesToday, " of ", InpMaxTradesPerDay, ").");
       else if(HasOpenTrade())              // only one open trade at a time
          Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - a trade from this EA is already open.");
       else
