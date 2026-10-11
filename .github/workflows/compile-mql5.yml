@@ -88,6 +88,7 @@ jobs:
           Write-Host "==================== SUMMARY ===================="
           $summaryLines | ForEach-Object { Write-Host $_ }
           if ($failed -gt 0) { exit 1 }
+          exit 0   # MetaEditor's own exit code is not an error count; ignore it
 
       - name: Upload compiled files and logs
         if: always()
