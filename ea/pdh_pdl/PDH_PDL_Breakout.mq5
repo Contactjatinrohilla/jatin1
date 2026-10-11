@@ -37,7 +37,7 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.30"
+#property version   "2.31"
 #property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
@@ -58,7 +58,8 @@ input double InpSL              = 50.0;    // Stop loss, price distance (NAS100 
 input double InpTP              = 100.0;   // Take profit, price distance (same units as the stop loss)
 input string InpEntryStart      = "02:00"; // No orders before this server time (rollover spreads)
 input string InpDayEnd          = "23:50"; // Close trades and delete orders at this server time
-input double InpMaxSpreadPctSL  = 10.0;    // Wait while the spread is above this % of the stop distance
+input double InpMaxSpreadPctSL  = 10.0;    // Wait while the spread is above this % of the stop distance (0 = off)
+input double InpMaxSpread       = 4.0;     // Wait while the spread is above this price distance (NAS100 4 = 4 points, 0 = off)
 input ulong  InpMagic           = 7710001; // Magic number
 
 input group "=== Confirmation, breakeven, trailing (off by default - see report) ==="
@@ -611,6 +612,8 @@ void ManageEntries()
    double spread = Spread(), dist = InpSL;
    if(InpMaxSpreadPctSL > 0.0 && spread > dist * InpMaxSpreadPctSL / 100.0)
      { Wait(StringFormat("spread %.*f is above %.1f%% of the stop distance %.*f", _Digits, spread, InpMaxSpreadPctSL, _Digits, dist)); return; }
+   if(InpMaxSpread > 0.0 && spread > InpMaxSpread)
+     { Wait(StringFormat("spread %.*f is above the maximum %.*f", _Digits, spread, _Digits, InpMaxSpread)); return; }
    if(InpMaxPositions > 0 && CountPositions(true) >= InpMaxPositions)
      { Wait(StringFormat("%d positions open with this magic (max %d)", CountPositions(true), InpMaxPositions)); return; }
 
@@ -711,8 +714,8 @@ int OnInit()
    else if(InpUseTrailing && (InpTrailStartDist < 0.0 || InpTrailBehind <= 0.0))
       bad = "Trailing: start must be >= 0 and distance > 0";
    else if(InpEntryMode == ENTRY_CLOSE && PeriodSeconds(InpConfirmTF) > 4 * 3600) bad = "ConfirmTF must be H4 or lower";
-   else if(InpMaxSpreadPctSL < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
-      bad = "MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
+   else if(InpMaxSpreadPctSL < 0.0 || InpMaxSpread < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
+      bad = "MaxSpreadPctSL, MaxSpread, MaxDailyLossPct and MaxPositions must be >= 0";
    if(bad != "") { Print("INVALID INPUT: ", bad); return INIT_PARAMETERS_INCORRECT; }
 
    g_trade.SetExpertMagicNumber(InpMagic);
@@ -722,7 +725,7 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.30 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.31 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
