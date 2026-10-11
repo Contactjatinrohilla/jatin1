@@ -1,0 +1,24 @@
+Equal-weight mean net expectancy (R) of the candidate with shifted levels
+ level_shift_atr      IS     VAL     OOS  trades
+           -0.25 -0.0052 -0.0227 -0.0169   16193
+           -0.10  0.0057  0.0062  0.0145   19296
+            0.00  0.0208  0.0124  0.0131   21990
+            0.10  0.0111  0.0057  0.0037   21325
+            0.25  0.0147  0.0097  0.0004   16893
+
+Candidate: net expectancy (R) long vs short
+side        short   long
+ins                     
+AUD_USD    -0.023  0.037
+BTC_USD     0.011  0.191
+EUR_JPY    -0.001  0.030
+EUR_USD    -0.012  0.011
+GBP_USD    -0.006  0.010
+JP225_USD   0.007  0.051
+NAS100_USD -0.031 -0.004
+SPX500_USD -0.017 -0.000
+UK100_GBP   0.017 -0.003
+US2000_USD -0.026 -0.006
+USD_CAD     0.012  0.008
+WTICO_USD   0.032  0.033
+XAU_USD     0.050  0.048
