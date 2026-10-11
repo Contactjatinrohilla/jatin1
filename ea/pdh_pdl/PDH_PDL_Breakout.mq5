@@ -24,7 +24,9 @@
 //|           follows price at TrailBehind. It only ever moves in the  |
 //|           trade's favour.                                          |
 //|           Anything still open at DayEnd is closed; unfilled        |
-//|           orders are deleted. No overnight / weekend holding.      |
+//|           orders are deleted 30 min before it. DayEnd moves        |
+//|           earlier automatically if the M1 history shows the market |
+//|           usually stops trading earlier on that weekday.           |
 //|   Limits  First fill cancels the other order (OCO). At most one    |
 //|           trade per symbol per server day, also after restarts.    |
 //|           Optional account-wide daily loss stop and max positions. |
@@ -37,7 +39,7 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.30"
+#property version   "2.31"
 #property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
@@ -75,6 +77,8 @@ input double InpTrailBehind     = 50.0;    // Trailing SL stays this price dista
 #define MIN_DAY_M1_BARS 360     // a day needs >= 6 h of M1 bars to count as complete
 #define MAX_LEVEL_AGE   4       // calendar days; older levels (long holiday) are not traded
 #define MAX_ATTEMPTS    5       // order send attempts per side per day
+#define CLOSE_BEFORE_LAST_BAR 10 // close this many minutes before the market's usual last bar of the day
+#define NO_ENTRY_LAST_MIN     30 // no new entries in the last 30 minutes before the day end
 
 //--- side state for today
 #define SIDE_WAIT    0          // not placed yet
@@ -221,6 +225,30 @@ int SessionEndMinute(const int dow)
    return (last <= 0) ? 1440 : (int)MathMin((long)1440, last);
   }
 
+// Minute after which this weekday usually has no more ticks, from the M1 history of the last
+// 3 complete days with the same weekday (median, so one holiday early close does not count). -1 = unknown.
+int HistoryDayEndMinute(const datetime today)
+  {
+   int dow = DayOfWeek(today);
+   int ends[];
+   ArrayResize(ends, 0);
+   for(int back = 1; back <= 35 && ArraySize(ends) < 3; back++)
+     {
+      datetime d = today - back * 86400;
+      if(DayOfWeek(d) != dow) continue;
+      datetime times[];
+      int n = CopyTime(_Symbol, PERIOD_M1, d, d + 86399, times);
+      if(n < MIN_DAY_M1_BARS) continue;                       // holiday / missing data
+      int k = ArraySize(ends);
+      ArrayResize(ends, k + 1);
+      ends[k] = MinuteOfDay(times[n - 1]) + 1;                // end of the last M1 bar
+     }
+   int k = ArraySize(ends);
+   if(k == 0) return -1;
+   ArraySort(ends);
+   return ends[k / 2];
+  }
+
 // True if the broker's trade session is open right now.
 bool SessionOpenNow()
   {
@@ -337,9 +365,19 @@ void NewDay(const datetime today)
    for(int s = 0; s < 2; s++) { g_side[s] = SIDE_WAIT; g_attempts[s] = 0; g_lastAttempt[s] = 0; g_confirmed[s] = false; }
    g_confInit    = false;
    g_lastConfBar = 0;
-   g_dayEnd     = (int)MathMin(g_endMin, SessionEndMinute(DayOfWeek(today)) - 5);
+   // day end = earliest of: input, broker session end - 5 min, usual last bar of this weekday - 10 min.
+   // (Ticks often stop before the session table says, e.g. NDX at 23:15 server: closing at 23:50
+   //  would then never happen and positions would be held overnight / over the weekend.)
+   g_dayEnd = (int)MathMin(g_endMin, SessionEndMinute(DayOfWeek(today)) - 5);
+   int histEnd = HistoryDayEndMinute(today);
+   if(histEnd > 0 && histEnd - CLOSE_BEFORE_LAST_BAR < g_dayEnd)
+     {
+      if(histEnd - CLOSE_BEFORE_LAST_BAR - NO_ENTRY_LAST_MIN > g_startMin) g_dayEnd = histEnd - CLOSE_BEFORE_LAST_BAR;
+      else PrintFormat("History says this weekday stops trading at %s - too early to use, day end kept at %s", HHMM(histEnd), HHMM(g_dayEnd));
+     }
    if(g_dayEnd < g_endMin)
-      PrintFormat("Session ends early today - day end moved to %s", HHMM(g_dayEnd));
+      PrintFormat("Market usually stops trading at %s on this weekday - everything is closed at %s, no new entries after %s",
+                  histEnd > 0 ? HHMM(histEnd) : "the session end", HHMM(g_dayEnd), HHMM(g_dayEnd - NO_ENTRY_LAST_MIN));
 
    // restart safety: already traded today / orders already live
    g_enteredToday = EnteredToday();
@@ -455,7 +493,7 @@ void PlaceSide(const int s)
    ENUM_ORDER_TYPE_TIME ttype = ORDER_TIME_GTC;
    datetime expiry = 0;
    if(!g_noExpiry && (SymbolInfoInteger(_Symbol, SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_SPECIFIED) != 0)
-     { ttype = ORDER_TIME_SPECIFIED; expiry = g_day + g_dayEnd * 60; }
+     { ttype = ORDER_TIME_SPECIFIED; expiry = g_day + (g_dayEnd - NO_ENTRY_LAST_MIN) * 60; }
 
    g_attempts[s]++;
    g_lastAttempt[s] = TimeCurrent();
@@ -722,7 +760,7 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.30 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.31 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
@@ -779,6 +817,15 @@ void OnTick()
       g_status = "day ended";
       UpdateComment();
       return;
+     }
+
+   // no new entries close to the day end: delete unfilled orders, keep managing open trades
+   if(mins >= g_dayEnd - NO_ENTRY_LAST_MIN && !g_dayClosed)
+     {
+      g_dayClosed = true;
+      g_status = "no new entries before the day end";
+      if(FindPending(true) > 0 || FindPending(false) > 0) DeletePendings("no new entries in the last 30 minutes");
+      PrintFormat("No new entries after %s (day end %s)", HHMM(g_dayEnd - NO_ENTRY_LAST_MIN), HHMM(g_dayEnd));
      }
 
    // OCO safety net (e.g. a delete that failed, or a restart right after a fill)
