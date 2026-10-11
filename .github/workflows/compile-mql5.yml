@@ -42,14 +42,26 @@ jobs:
         shell: pwsh
         run: |
           $me  = "C:\Program Files\MetaTrader 5\MetaEditor64.exe"
-          # MetaEditor cuts /inc: at the first space, so copy the standard
-          # MQL5 folder (Include\Trade\Trade.mqh etc.) to a path without spaces
-          $inc = "$env:RUNNER_TEMP\MQL5"
-          Copy-Item "C:\Program Files\MetaTrader 5\MQL5" $inc -Recurse -Force
-          if (-not (Test-Path "$inc\Include\Trade\Trade.mqh")) {
-            Write-Host "Trade.mqh not found in the installed MQL5 folder:"
-            Get-ChildItem -Recurse "C:\Program Files\MetaTrader 5" -Filter Trade.mqh | Select-Object FullName
+          # The standard MQL5 folder (Include\Trade\Trade.mqh ...) is created the
+          # first time the terminal runs. Look in AppData and the install folder;
+          # if it is not there, start the terminal once in portable mode.
+          function Find-TradeMqh {
+            Get-ChildItem -Recurse -ErrorAction SilentlyContinue -Filter Trade.mqh `
+              "$env:APPDATA\MetaQuotes", "C:\Program Files\MetaTrader 5" |
+              Where-Object { $_.FullName -like "*\Include\Trade\Trade.mqh" } | Select-Object -First 1
           }
+          $t = Find-TradeMqh
+          if (-not $t) {
+            Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe" -ArgumentList "/portable"
+            for ($i = 0; $i -lt 60 -and -not $t; $i++) { Start-Sleep 5; $t = Find-TradeMqh }
+            Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+          if (-not $t) { Write-Error "Standard MQL5 include files not found"; exit 1 }
+          $src = $t.Directory.Parent.Parent.FullName      # ...\MQL5
+          Write-Host "Standard MQL5 folder: $src"
+          # MetaEditor cuts /inc: at the first space, so use a copy without spaces
+          $inc = "$env:RUNNER_TEMP\MQL5"
+          Copy-Item $src $inc -Recurse -Force
           $files = "${{ github.event.inputs.files }}".Trim()
           if ($files) { $list = $files -split '\s+' }
           else { $list = Get-ChildItem -Recurse -Path ea -Filter *.mq5 | ForEach-Object { $_.FullName } }
