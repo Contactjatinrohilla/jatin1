@@ -66,6 +66,7 @@ jobs:
           if ($files) { $list = $files -split '\s+' }
           else { $list = Get-ChildItem -Recurse -Path ea -Filter *.mq5 | ForEach-Object { $_.FullName } }
           $failed = 0
+          $summaryLines = @()
           foreach ($f in $list) {
             $full = (Resolve-Path $f).Path
             $log  = [IO.Path]::ChangeExtension($full, ".log")
@@ -73,14 +74,19 @@ jobs:
             Start-Sleep 2
             $text = Get-Content $log -Encoding Unicode -ErrorAction SilentlyContinue
             Write-Host "===== $f"
-            $text | ForEach-Object { Write-Host $_ }
+            # print only errors, warnings and the result line (skip progress noise)
+            $text | Where-Object { $_ -match "error|warning|Result:" } | ForEach-Object { Write-Host $_ }
             $summary = $text | Select-String -Pattern "Result:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?"
             if (-not $summary) { Write-Host "::error file=$f::no compile result found"; $failed++; continue }
             $err = [int]$summary.Matches[0].Groups[1].Value
             $wrn = [int]$summary.Matches[0].Groups[2].Value
+            $summaryLines += ("{0,3} errors {1,3} warnings  {2}" -f $err, $wrn, (Resolve-Path -Relative $full))
             if ($err -gt 0)      { Write-Host "::error file=$f::$err errors, $wrn warnings"; $failed++ }
             elseif ($wrn -gt 0)  { Write-Host "::warning file=$f::$wrn warnings" }
           }
+          Write-Host ""
+          Write-Host "==================== SUMMARY ===================="
+          $summaryLines | ForEach-Object { Write-Host $_ }
           if ($failed -gt 0) { exit 1 }
 
       - name: Upload compiled files and logs
