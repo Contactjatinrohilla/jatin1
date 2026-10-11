@@ -1,0 +1,74 @@
+# Compiles every changed MQL5 Expert Advisor with MetaEditor on a Windows
+# runner, so errors and warnings show up on each push (no local MT5 needed).
+name: Compile MQL5
+
+on:
+  push:
+    paths:
+      - "ea/**/*.mq5"
+      - ".github/workflows/compile-mql5.yml"
+  workflow_dispatch:
+    inputs:
+      files:
+        description: "Files to compile (space separated, empty = all ea/**/*.mq5)"
+        required: false
+        default: ""
+
+jobs:
+  compile:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install MetaTrader 5 (includes MetaEditor)
+        shell: pwsh
+        run: |
+          $setup = "$env:RUNNER_TEMP\mt5setup.exe"
+          Invoke-WebRequest "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile $setup
+          $p = Start-Process $setup -ArgumentList "/auto" -PassThru
+          # the web installer downloads the terminal in the background; wait for MetaEditor
+          $me = "C:\Program Files\MetaTrader 5\MetaEditor64.exe"
+          for ($i = 0; $i -lt 120 -and -not (Test-Path $me); $i++) { Start-Sleep 5 }
+          Start-Sleep 20
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not (Test-Path $me)) { Write-Error "MetaEditor not installed"; exit 1 }
+          Get-ChildItem "C:\Program Files\MetaTrader 5" | Select-Object Name
+          Get-ChildItem "C:\Program Files\MetaTrader 5\MQL5" -ErrorAction SilentlyContinue | Select-Object Name
+
+      - name: Compile
+        shell: pwsh
+        run: |
+          $me  = "C:\Program Files\MetaTrader 5\MetaEditor64.exe"
+          $inc = "C:\Program Files\MetaTrader 5\MQL5"
+          $files = "${{ github.event.inputs.files }}".Trim()
+          if ($files) { $list = $files -split '\s+' }
+          else { $list = Get-ChildItem -Recurse -Path ea -Filter *.mq5 | ForEach-Object { $_.FullName } }
+          $failed = 0
+          foreach ($f in $list) {
+            $full = (Resolve-Path $f).Path
+            $log  = [IO.Path]::ChangeExtension($full, ".log")
+            & $me /compile:"$full" /inc:"$inc" /log:"$log" | Out-Null
+            Start-Sleep 2
+            $text = Get-Content $log -Encoding Unicode -ErrorAction SilentlyContinue
+            Write-Host "===== $f"
+            $text | ForEach-Object { Write-Host $_ }
+            $summary = $text | Select-String -Pattern "Result:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?"
+            if (-not $summary) { Write-Host "::error file=$f::no compile result found"; $failed++; continue }
+            $err = [int]$summary.Matches[0].Groups[1].Value
+            $wrn = [int]$summary.Matches[0].Groups[2].Value
+            if ($err -gt 0)      { Write-Host "::error file=$f::$err errors, $wrn warnings"; $failed++ }
+            elseif ($wrn -gt 0)  { Write-Host "::warning file=$f::$wrn warnings" }
+          }
+          if ($failed -gt 0) { exit 1 }
+
+      - name: Upload compiled files and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mql5-build
+          path: |
+            ea/**/*.ex5
+            ea/**/*.log
