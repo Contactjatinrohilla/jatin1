@@ -17,9 +17,10 @@
 //|                 beyond the level, then a market order is sent      |
 //|                 (only while price is still beyond the level).      |
 //|   Exit    Fixed SL and TP distances from the entry price.          |
-//|           Optional trailing stop (off by default): once the trade  |
-//|           is TrailStart in profit, the SL follows price at         |
-//|           TrailDist. It only ever moves in the trade's favour.     |
+//|           Optional trailing stop (UseTrailing, off by default):    |
+//|           once the trade is TrailStartDist in profit, the SL       |
+//|           follows price at TrailBehind. It only ever moves in the  |
+//|           trade's favour.                                          |
 //|           Anything still open at DayEnd is closed; unfilled        |
 //|           orders are deleted. No overnight / weekend holding.      |
 //|   Limits  First fill cancels the other order (OCO). At most one    |
@@ -34,7 +35,7 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.20"
+#property version   "2.21"
 #property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
@@ -61,8 +62,9 @@ input ulong  InpMagic           = 7710001; // Magic number
 input group "=== Confirmation and trailing (both tested worse / not better - see report) ==="
 input ENUM_ENTRY_MODE InpEntryMode = ENTRY_STOP;   // Entry type
 input ENUM_TIMEFRAMES InpConfirmTF = PERIOD_M15;   // CLOSE mode: candle that must close beyond the level
-input double InpTrailStart      = 0.0;     // Trailing starts at this profit, price distance (0 = trailing off)
-input double InpTrailDist       = 0.0;     // Trailing SL stays this price distance behind price
+input bool   InpUseTrailing     = false;   // Trailing stop on/off
+input double InpTrailStartDist  = 50.0;    // Trailing starts at this profit, price distance
+input double InpTrailBehind     = 50.0;    // Trailing SL stays this price distance behind price
 
 //--- fixed rules (part of the tested strategy, not meant to be tuned)
 #define MIN_DAY_M1_BARS 360     // a day needs >= 6 h of M1 bars to count as complete
@@ -624,12 +626,12 @@ void ManageEntries()
 //+------------------------------------------------------------------+
 void ManageTrailing()
   {
-   if(InpTrailStart <= 0.0 || InpTrailDist <= 0.0) return;
+   if(!InpUseTrailing) return;
    double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double minD = MinStopDistance();
    double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double step = MathMax(tick > 0.0 ? tick : _Point, InpTrailDist * 0.1);   // move in steps of >= 10% of the distance
+   double step = MathMax(tick > 0.0 ? tick : _Point, InpTrailBehind * 0.1);   // move in steps of >= 10% of the distance
    double freeze = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -640,8 +642,8 @@ void ManageTrailing()
       double sl     = PositionGetDouble(POSITION_SL);
       double tp     = PositionGetDouble(POSITION_TP);
       double profit = buy ? bid - open : open - ask;
-      if(profit < InpTrailStart) continue;
-      double newSL = NormPrice(buy ? bid - InpTrailDist : ask + InpTrailDist);
+      if(profit < InpTrailStartDist) continue;
+      double newSL = NormPrice(buy ? bid - InpTrailBehind : ask + InpTrailBehind);
       if(sl != 0.0 && (buy ? newSL < sl + step : newSL > sl - step)) continue;            // not enough improvement
       if(buy ? bid - newSL < minD : newSL - ask < minD) continue;                          // broker minimum distance
       if(freeze > 0.0 && sl != 0.0 && (buy ? bid - sl : sl - ask) <= freeze) continue;     // SL inside the freeze level
@@ -683,8 +685,8 @@ int OnInit()
    if(g_startMin < 0 || g_endMin < 0 || g_endMin <= g_startMin) bad = "EntryStart / DayEnd must be HH:MM with start before end";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)               bad = "RiskPct must be > 0 and <= 5";
    else if(InpSL <= 0.0 || InpTP <= 0.0)                         bad = "SL and TP must be > 0 (price distance)";
-   else if(InpTrailStart < 0.0 || InpTrailDist < 0.0)           bad = "TrailStart and TrailDist must be >= 0";
-   else if(InpTrailStart > 0.0 && InpTrailDist <= 0.0)          bad = "TrailDist must be > 0 when trailing is on";
+   else if(InpUseTrailing && (InpTrailStartDist < 0.0 || InpTrailBehind <= 0.0))
+      bad = "Trailing: start must be >= 0 and distance > 0";
    else if(InpEntryMode == ENTRY_CLOSE && PeriodSeconds(InpConfirmTF) > 4 * 3600) bad = "ConfirmTF must be H4 or lower";
    else if(InpMaxSpreadPctSL < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
       bad = "MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
@@ -697,7 +699,7 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.20 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.21 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
@@ -706,9 +708,9 @@ int OnInit()
                InpRiskPct, _Digits, InpSL, _Digits, InpTP, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
    PrintFormat("Entry: %s%s | trailing: %s", InpEntryMode == ENTRY_STOP ? "stop orders at PDH / PDL" : "candle close beyond the level, ",
                InpEntryMode == ENTRY_STOP ? "" : EnumToString(InpConfirmTF),
-               InpTrailStart > 0.0 ? StringFormat("starts at %.*f profit, distance %.*f", _Digits, InpTrailStart, _Digits, InpTrailDist) : "off");
-   if(InpTrailStart > 0.0 && InpTrailDist <= MinStopDistance())
-      PrintFormat("WARNING: TrailDist %.*f is not above the broker's minimum stop distance %.*f - the SL cannot follow price", _Digits, InpTrailDist, _Digits, MinStopDistance());
+               InpUseTrailing ? StringFormat("starts at %.*f profit, distance %.*f", _Digits, InpTrailStartDist, _Digits, InpTrailBehind) : "off");
+   if(InpUseTrailing && InpTrailBehind <= MinStopDistance())
+      PrintFormat("WARNING: TrailBehind %.*f is not above the broker's minimum stop distance %.*f - the SL cannot follow price", _Digits, InpTrailBehind, _Digits, MinStopDistance());
    return INIT_SUCCEEDED;
   }
 

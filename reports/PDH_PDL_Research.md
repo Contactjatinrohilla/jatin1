@@ -242,9 +242,9 @@ New inputs (group "Confirmation and trailing"):
   the level; if price falls back inside first, the EA waits for a new close beyond. A candle that closed beyond the
   level before `EntryStart`, or a day that opens beyond it, skips that side for the day. SL/TP are measured from the
   actual fill price.
-* `InpTrailStart` / `InpTrailDist`: once the trade is `TrailStart` in profit (price distance), the SL follows price at
-  `TrailDist`. It moves only in the trade's favour, in steps of at least 10 % of the distance, and respects the
-  broker's stop and freeze levels. `TrailStart = 0` turns trailing off (default).
+* `InpUseTrailing` + `InpTrailStartDist` / `InpTrailBehind` (v2.21; defaults 50 / 50 so the tester shows optimisation ranges): once the trade is `TrailStartDist` in profit (price distance), the SL follows price at
+  `TrailBehind`. It moves only in the trade's favour, in steps of at least 10 % of the distance, and respects the
+  broker's stop and freeze levels. `InpUseTrailing = false` turns it off (default).
 
 Both are **off by default** because the tests did not support them. Backtest with fixed SL/TP, 02:00 start, net of
 costs, IS 2005–12 / VAL 2013–16 / OOS 2017–20 (`research/pdh_pdl/results/6_fixed_sl_confirmation_trailing.txt`):
