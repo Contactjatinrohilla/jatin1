@@ -15,10 +15,15 @@
 //|  take profit = risk x RR. Daily / weekly prop-firm loss limits.   |
 //|  Optional TP1 / TP2: close a % of the position at risk x TP1 RR   |
 //|  and risk x TP2 RR; the rest runs to the final take profit.       |
+//|                                                                  |
+//|  v1.04 RESEARCH: every pattern found is written to a CSV file     |
+//|  (Common\Files) with its features and what price did afterwards,  |
+//|  so tools/morningstar_edge.py can measure which signals have an   |
+//|  edge. Optional filters (all OFF by default) apply the findings.  |
 //|  Works on any symbol: all sizes come from the symbol's settings.  |
 //+------------------------------------------------------------------+
 #property copyright "MorningStar_EA"
-#property version   "1.03"
+#property version   "1.04"
 
 #include <Trade\Trade.mqh>
 
@@ -30,10 +35,18 @@ input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_M15; // Timeframe to look for 
 input double          InpEqualTolerance  = 0;          // How close C2's low must be to C1's low to count as "equal" (price)
 input double          InpMaxUpperWickPct = 30;         // Max upper wick of signal candle, % of its size
 
+input group "Filters (all OFF by default - switch on only what the research supports)"
+input bool            InpRequireBullishSignal = false; // Signal candle must close above its own open
+input double          InpMinSweepATR     = 0;          // C2 low must be below C1 low by this x ATR(14) (0 = off)
+input int             InpTrendEMA        = 0;          // Only buy if signal close is above this EMA (0 = off)
+input int             InpStartHour       = 0;          // Trade only from this server hour...
+input int             InpEndHour         = 24;         // ...up to (not including) this hour (0 and 24 = all day)
+
 input group "Risk"
 input double          InpRiskUSD         = 100;        // Dollars lost if stop loss is hit
 input double          InpRR              = 2.0;        // Take profit = risk x this number
 input double          InpSLBufferPct     = 10;         // SL below signal candle low, % of its size
+input bool            InpSLAtPatternLow  = false;      // true = SL below the LOWEST low of the pattern (usually C2) instead of the signal candle
 input double          InpMaxLots         = 5.0;        // Safety cap on lot size
 
 input group "Partial take profits (TP1 / TP2)"
@@ -47,6 +60,10 @@ input bool            InpUseLossLimits   = true;       // Use the daily / weekly
 input double          InpDailyLossPct    = 2.5;        // Daily loss limit, % of start-of-day balance
 input double          InpWeeklyLossPct   = 8.5;        // Weekly loss limit, % of start-of-week balance
 input int             InpMaxTradesPerDay = 2;          // Max new trades per server day (0 = no limit)
+
+input group "Research log"
+input bool            InpLogSignals      = true;       // Write every pattern + its outcome to a CSV (Common\Files)
+input int             InpLogMaxBars      = 100;        // Follow each logged signal for at most this many candles
 
 input group "Other"
 input long            InpMagic           = 880088;     // ID number that marks this EA's trades
@@ -72,6 +89,11 @@ ulong    g_warnTicket    = 0;     // Position + level of the last "lots too smal
 string   g_warnLevel     = "";    // (so that message is printed only once)
 
 int      g_tradesToday   = 0;     // Trades this EA opened on this symbol today (server day)
+
+int      g_hATR          = INVALID_HANDLE; // ATR(14) on InpTimeframe
+int      g_hEMA50        = INVALID_HANDLE; // EMA 50 on InpTimeframe (research)
+int      g_hEMA200       = INVALID_HANDLE; // EMA 200 on InpTimeframe (research)
+int      g_hTrend        = INVALID_HANDLE; // EMA InpTrendEMA on InpTimeframe (filter)
 
 const string EA_NAME     = "MorningStar_EA";
 
@@ -178,6 +200,287 @@ int DetectPattern()
       return 4;
 
    return 0;
+}
+
+//==================================================================
+// INDICATOR + STOP LOSS HELPERS
+//==================================================================
+
+// Value of an indicator buffer at a shift (0 if not available yet)
+double IndValue(int handle, int shift)
+{
+   if(handle == INVALID_HANDLE)
+      return 0;
+   double buf[1];
+   if(CopyBuffer(handle, 0, shift, 1, buf) != 1)
+      return 0;
+   return buf[0];
+}
+
+// Lowest low of the pattern candles (shift 1 .. C1)
+double PatternLow(int patternType)
+{
+   double lo = CandleLow(1);
+   for(int s = 2; s <= patternType; s++)
+      lo = MathMin(lo, CandleLow(s));
+   return lo;
+}
+
+// Stop loss price before rounding. Buffer is always a % of the signal candle's size.
+//   atPatternLow = false -> below the signal candle's low (original rule)
+//   atPatternLow = true  -> below the lowest low of the whole pattern
+double RawStopLoss(int patternType, bool atPatternLow)
+{
+   double base = atPatternLow ? PatternLow(patternType) : CandleLow(1);
+   return base - (InpSLBufferPct / 100.0) * CandleRange(1);
+}
+
+//==================================================================
+// FILTERS - extra conditions, all OFF by default.
+// Returns true if the signal may be traded; otherwise "why" says which
+// filter blocked it.
+//==================================================================
+bool FiltersPass(int patternType, string &why)
+{
+   int c1 = patternType;    // C1 shift is 3 or 4
+   int c2 = patternType - 1;
+
+   if(InpRequireBullishSignal && CandleClose(1) <= CandleOpen(1))
+   {
+      why = "signal candle is not bullish";
+      return false;
+   }
+   if(InpMinSweepATR > 0)
+   {
+      double atr = IndValue(g_hATR, 1);
+      if(atr <= 0 || CandleLow(c1) - CandleLow(c2) < InpMinSweepATR * atr)
+      {
+         why = "C2 did not sweep C1's low by " + DoubleToString(InpMinSweepATR, 2) + " x ATR";
+         return false;
+      }
+   }
+   if(InpTrendEMA > 0)
+   {
+      double ema = IndValue(g_hTrend, 1);
+      if(ema <= 0 || CandleClose(1) <= ema)
+      {
+         why = "signal close is not above EMA " + IntegerToString(InpTrendEMA);
+         return false;
+      }
+   }
+   bool allDay = (InpStartHour == InpEndHour) || (InpStartHour <= 0 && InpEndHour >= 24);
+   if(!allDay)
+   {
+      MqlDateTime t;
+      TimeToStruct(TimeCurrent(), t);
+      bool inside = (InpStartHour < InpEndHour)
+                    ? (t.hour >= InpStartHour && t.hour < InpEndHour)
+                    : (t.hour >= InpStartHour || t.hour < InpEndHour);   // window over midnight
+      if(!inside)
+      {
+         why = "outside trading hours " + IntegerToString(InpStartHour) + "-" + IntegerToString(InpEndHour);
+         return false;
+      }
+   }
+   return true;
+}
+
+//==================================================================
+// RESEARCH LOG
+// Every pattern found (traded or not, filters or not) is followed as a
+// "virtual" BUY at the Ask on the first tick after the signal candle.
+// For two stop-loss styles (A = signal candle low, B = pattern low) it
+// records the best profit reached BEFORE the stop was hit (MFE, in R),
+// whether the stop was hit, and the result when the follow-up ended.
+// With that, any take profit level can be tested afterwards:
+//   MFE >= TP  -> win of TP R,  stop hit first -> -1 R.
+// The file goes to the terminal's Common\Files folder.
+//==================================================================
+struct VSignal
+{
+   string   feat;          // feature columns, already formatted
+   datetime barTime;       // open time of the entry candle
+   double   entry;
+   double   sl[2];
+   double   risk[2];
+   double   mfe[2];        // best (bid - entry) seen before the stop
+   bool     done[2];
+   int      hit[2];        // 1 = stop loss hit
+   double   lastR[2];      // result in R when the follow-up ended
+   int      bars[2];
+};
+VSignal  g_vs[];
+int      g_logFile = INVALID_HANDLE;
+
+string F3(double v) { return DoubleToString(v, 3); }
+
+void OpenSignalLog()
+{
+   if(!InpLogSignals)
+      return;
+   string name = "MorningStar_signals_" + _Symbol + "_" + EnumToString(InpTimeframe) + ".csv";
+   g_logFile = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(g_logFile == INVALID_HANDLE)
+   {
+      Print(EA_NAME, ": could not create research log ", name, " (error ", GetLastError(), ")");
+      return;
+   }
+   FileWriteString(g_logFile,
+      "time,weekday,hour,pattern,atr,c1_range_atr,c1_body_atr,sweep_atr,c2_close_pos,"
+      "sig_bull,sig_body_pct,sig_uwick_pct,sig_range_atr,sig_close_vs_c1high_atr,"
+      "riskA_atr,riskB_atr,spread_riskA,dist_ema50_atr,dist_ema200_atr,ema50_slope_atr,"
+      "prior_move_atr,day_move_atr,"
+      "entry,slA,mfeA_R,hitA,lastA_R,barsA,slB,mfeB_R,hitB,lastB_R,barsB\r\n");
+   Print(EA_NAME, ": research log -> Common\\Files\\", name);
+}
+
+void WriteSignal(int i)
+{
+   if(g_logFile == INVALID_HANDLE)
+      return;
+   string line = g_vs[i].feat + "," + DoubleToString(g_vs[i].entry, _Digits);
+   for(int k = 0; k < 2; k++)
+      line += "," + DoubleToString(g_vs[i].sl[k], _Digits)
+            + "," + F3(g_vs[i].mfe[k] / g_vs[i].risk[k])
+            + "," + IntegerToString(g_vs[i].hit[k])
+            + "," + F3(g_vs[i].lastR[k])
+            + "," + IntegerToString(g_vs[i].bars[k]);
+   FileWriteString(g_logFile, line + "\r\n");
+   FileFlush(g_logFile);
+}
+
+// Called on the first tick of a new candle when a pattern was found
+void LogSignal(int patternType)
+{
+   if(g_logFile == INVALID_HANDLE)
+      return;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0)
+      return;
+
+   int    c1  = patternType, c2 = patternType - 1;
+   double atr = IndValue(g_hATR, 1);
+   if(atr <= 0)
+      return;                                   // indicator not ready yet
+
+   VSignal v;
+   v.barTime = iTime(_Symbol, InpTimeframe, 0);
+   v.entry   = tick.ask;
+   v.sl[0]   = RawStopLoss(patternType, false);
+   v.sl[1]   = RawStopLoss(patternType, true);
+   for(int k = 0; k < 2; k++)
+   {
+      v.risk[k]  = v.entry - v.sl[k];
+      v.mfe[k]   = 0;
+      v.done[k]  = (v.risk[k] <= 0);            // impossible stop -> nothing to follow
+      v.hit[k]   = 0;
+      v.lastR[k] = 0;
+      v.bars[k]  = 0;
+      if(v.risk[k] <= 0)
+         v.risk[k] = 1e-10;
+   }
+
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(), t);
+   double c1Range = CandleRange(c1);
+   double sigRng  = CandleRange(1);
+   double ema50   = IndValue(g_hEMA50, 1);
+   double ema200  = IndValue(g_hEMA200, 1);
+   double ema50b  = IndValue(g_hEMA50, 11);
+   double dOpen   = iOpen(_Symbol, PERIOD_D1, 0);
+   double prior0  = iClose(_Symbol, InpTimeframe, c1 + 1);
+   double prior10 = iClose(_Symbol, InpTimeframe, c1 + 11);
+
+   v.feat = TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES)
+          + "," + IntegerToString(t.day_of_week)
+          + "," + IntegerToString(t.hour)
+          + "," + IntegerToString(patternType)
+          + "," + DoubleToString(atr, _Digits)
+          + "," + F3(c1Range / atr)
+          + "," + F3((CandleOpen(c1) - CandleClose(c1)) / atr)
+          + "," + F3((CandleLow(c1) - CandleLow(c2)) / atr)
+          + "," + F3(c1Range > 0 ? (CandleClose(c2) - CandleLow(c1)) / c1Range : 0)
+          + "," + IntegerToString(CandleClose(1) > CandleOpen(1) ? 1 : 0)
+          + "," + F3(sigRng > 0 ? MathAbs(CandleClose(1) - CandleOpen(1)) / sigRng * 100 : 0)
+          + "," + F3(sigRng > 0 ? UpperWick(1) / sigRng * 100 : 0)
+          + "," + F3(sigRng / atr)
+          + "," + F3((CandleClose(1) - CandleHigh(c1)) / atr)
+          + "," + F3((v.entry - v.sl[0]) / atr)
+          + "," + F3((v.entry - v.sl[1]) / atr)
+          + "," + F3((tick.ask - tick.bid) / v.risk[0])
+          + "," + F3(ema50  > 0 ? (CandleClose(1) - ema50)  / atr : 0)
+          + "," + F3(ema200 > 0 ? (CandleClose(1) - ema200) / atr : 0)
+          + "," + F3(ema50 > 0 && ema50b > 0 ? (ema50 - ema50b) / atr : 0)
+          + "," + F3(prior0 > 0 && prior10 > 0 ? (prior0 - prior10) / atr : 0)
+          + "," + F3(dOpen > 0 ? (CandleClose(1) - dOpen) / atr : 0);
+
+   int n = ArraySize(g_vs);
+   ArrayResize(g_vs, n + 1);
+   g_vs[n] = v;
+}
+
+// Called on every tick: update each followed signal with the current Bid
+void UpdateSignals(bool newBar)
+{
+   if(g_logFile == INVALID_HANDLE)
+      return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0)
+      return;
+
+   for(int i = ArraySize(g_vs) - 1; i >= 0; i--)
+   {
+      int barsSince = newBar ? iBarShift(_Symbol, InpTimeframe, g_vs[i].barTime) : -1;
+      for(int k = 0; k < 2; k++)
+      {
+         if(g_vs[i].done[k])
+            continue;
+         if(bid <= g_vs[i].sl[k])                       // stop loss reached
+         {
+            g_vs[i].done[k]  = true;
+            g_vs[i].hit[k]   = 1;
+            g_vs[i].lastR[k] = -1;
+            g_vs[i].bars[k]  = iBarShift(_Symbol, InpTimeframe, g_vs[i].barTime);
+            continue;
+         }
+         g_vs[i].mfe[k] = MathMax(g_vs[i].mfe[k], bid - g_vs[i].entry);
+         if(barsSince >= InpLogMaxBars)                 // followed long enough
+         {
+            g_vs[i].done[k]  = true;
+            g_vs[i].lastR[k] = (bid - g_vs[i].entry) / g_vs[i].risk[k];
+            g_vs[i].bars[k]  = barsSince;
+         }
+      }
+      if(g_vs[i].done[0] && g_vs[i].done[1])
+      {
+         WriteSignal(i);
+         int last = ArraySize(g_vs) - 1;               // remove: move the last one here, shrink
+         if(i != last)
+            g_vs[i] = g_vs[last];
+         ArrayResize(g_vs, last);
+      }
+   }
+}
+
+// At the end of a test: write signals still being followed (stop not hit)
+void FlushSignals()
+{
+   if(g_logFile == INVALID_HANDLE)
+      return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   for(int i = 0; i < ArraySize(g_vs); i++)
+   {
+      for(int k = 0; k < 2; k++)
+         if(!g_vs[i].done[k])
+         {
+            g_vs[i].lastR[k] = (bid - g_vs[i].entry) / g_vs[i].risk[k];
+            g_vs[i].bars[k]  = iBarShift(_Symbol, InpTimeframe, g_vs[i].barTime);
+         }
+      WriteSignal(i);
+   }
+   ArrayResize(g_vs, 0);
+   FileClose(g_logFile);
+   g_logFile = INVALID_HANDLE;
 }
 
 //==================================================================
@@ -468,7 +771,7 @@ int StepDigits(double step)
 //==================================================================
 void OpenBuy(int patternType)
 {
-   const int sig = 1; // the signal candle is always the last closed candle
+   // The signal candle is always the last closed candle (shift 1)
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0)
@@ -483,10 +786,9 @@ void OpenBuy(int patternType)
    if(tickSize <= 0)
       tickSize = _Point;   // ASSUMPTION: fall back to the point size if the broker reports 0
 
-   // --- Stop loss: below the signal candle's low by a % of its size
-   double range = CandleRange(sig);
-   double sl    = CandleLow(sig) - (InpSLBufferPct / 100.0) * range;
-   sl = RoundToTick(sl, tickSize);
+   // --- Stop loss: below the signal candle's low (or the pattern's low if
+   //     InpSLAtPatternLow) by a % of the signal candle's size
+   double sl = RoundToTick(RawStopLoss(patternType, InpSLAtPatternLow), tickSize);
 
    double slDist = ask - sl;
    if(slDist <= 0)
@@ -756,6 +1058,14 @@ int OnInit()
             " but the chart is ", EnumToString(_Period),
             ". The EA trades patterns on ", EnumToString(InpTimeframe), " candles only.");
 
+   // Indicators used by the filters and the research log
+   g_hATR    = iATR(_Symbol, InpTimeframe, 14);
+   g_hEMA50  = iMA(_Symbol, InpTimeframe, 50,  0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA200 = iMA(_Symbol, InpTimeframe, 200, 0, MODE_EMA, PRICE_CLOSE);
+   if(InpTrendEMA > 0)
+      g_hTrend = iMA(_Symbol, InpTimeframe, InpTrendEMA, 0, MODE_EMA, PRICE_CLOSE);
+   OpenSignalLog();
+
    // Save the current candle time so an old signal is not traded on attach
    g_lastBarTime = iTime(_Symbol, InpTimeframe, 0);
 
@@ -775,6 +1085,11 @@ int OnInit()
 //==================================================================
 void OnDeinit(const int reason)
 {
+   FlushSignals();
+   if(g_hATR    != INVALID_HANDLE) IndicatorRelease(g_hATR);
+   if(g_hEMA50  != INVALID_HANDLE) IndicatorRelease(g_hEMA50);
+   if(g_hEMA200 != INVALID_HANDLE) IndicatorRelease(g_hEMA200);
+   if(g_hTrend  != INVALID_HANDLE) IndicatorRelease(g_hTrend);
    Comment("");
 }
 
@@ -790,11 +1105,17 @@ void OnTick()
    ManagePartialTPs();
 
    // 2. Pattern is checked only once, on the first tick of a new candle
-   if(IsNewBar())
+   bool   newBar = IsNewBar();
+   string why    = "";
+   if(newBar)
    {
       int patternType = DetectPattern();
+      if(patternType > 0)
+         LogSignal(patternType);           // research log: every pattern, before any filter
       if(patternType == 0)
          ExplainNoPattern();               // Journal note if a pattern started but failed
+      else if(!FiltersPass(patternType, why))
+         Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED by filter - ", why, ".");
       else if(InpUseLossLimits && g_weeklyHit)
          Print(EA_NAME, ": ", patternType, "-candle pattern found but SKIPPED - weekly loss limit hit.");
       else if(InpUseLossLimits && g_dailyHit)
@@ -807,6 +1128,9 @@ void OnTick()
       else
          OpenBuy(patternType);
    }
+
+   // 2b. Research log: follow every logged signal with the current price
+   UpdateSignals(newBar);
 
    // 3. Refresh the on-chart text
    UpdateDisplay();
