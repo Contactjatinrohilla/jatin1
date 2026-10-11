@@ -9,3 +9,4 @@ python3 diag.py > results/2_one_variable_tests.txt
 python3 sens.py > results/3_filter_sensitivity.txt
 python3 cand.py > results/4_candidate.txt
 python3 placebo.py > results/5_placebo_long_short.txt
+python3 fixed_tests.py > results/6_fixed_sl_confirmation_trailing.txt

@@ -9,10 +9,17 @@
 //|           with at least 6 hours of M1 data (Sunday stubs are       |
 //|           skipped). Nothing from today is used.                    |
 //|   Entry   From EntryStart (default 02:00 server, after the         |
-//|           rollover spreads) a BUY STOP at PDH and a SELL STOP at   |
-//|           PDL. A side is skipped if today's price already touched  |
-//|           its level before the order could be placed.              |
-//|   Exit    Fixed SL and TP distances from the order price.          |
+//|           rollover spreads), one of:                               |
+//|           STOP  (default, tested best): BUY STOP at PDH and SELL   |
+//|                 STOP at PDL. A side is skipped if its level was    |
+//|                 already touched before the order could be placed.  |
+//|           CLOSE (confirmation): a ConfirmTF candle must CLOSE      |
+//|                 beyond the level, then a market order is sent      |
+//|                 (only while price is still beyond the level).      |
+//|   Exit    Fixed SL and TP distances from the entry price.          |
+//|           Optional trailing stop (off by default): once the trade  |
+//|           is TrailStart in profit, the SL follows price at         |
+//|           TrailDist. It only ever moves in the trade's favour.     |
 //|           Anything still open at DayEnd is closed; unfilled        |
 //|           orders are deleted. No overnight / weekend holding.      |
 //|   Limits  First fill cancels the other order (OCO). At most one    |
@@ -27,10 +34,16 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.10"
+#property version   "2.20"
 #property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
+
+enum ENUM_ENTRY_MODE
+  {
+   ENTRY_STOP  = 0,   // Stop order at PDH / PDL (tested best)
+   ENTRY_CLOSE = 1    // Confirmation: candle closes beyond the level, then market order
+  };
 
 input group "=== Risk ==="
 input double InpRiskPct         = 0.5;     // Risk per trade, % of balance
@@ -44,6 +57,12 @@ input string InpEntryStart      = "02:00"; // No orders before this server time 
 input string InpDayEnd          = "23:50"; // Close trades and delete orders at this server time
 input double InpMaxSpreadPctSL  = 10.0;    // Wait while the spread is above this % of the stop distance
 input ulong  InpMagic           = 7710001; // Magic number
+
+input group "=== Confirmation and trailing (both tested worse / not better - see report) ==="
+input ENUM_ENTRY_MODE InpEntryMode = ENTRY_STOP;   // Entry type
+input ENUM_TIMEFRAMES InpConfirmTF = PERIOD_M15;   // CLOSE mode: candle that must close beyond the level
+input double InpTrailStart      = 0.0;     // Trailing starts at this profit, price distance (0 = trailing off)
+input double InpTrailDist       = 0.0;     // Trailing SL stays this price distance behind price
 
 //--- fixed rules (part of the tested strategy, not meant to be tuned)
 #define MIN_DAY_M1_BARS 360     // a day needs >= 6 h of M1 bars to count as complete
@@ -73,6 +92,10 @@ datetime g_lastComment = 0;
 datetime g_lastLossCheck = 0;
 bool     g_enteredToday = false;         // an entry happened today on this symbol (history / fills)
 bool     g_noExpiry = false;             // broker rejected a specified expiry -> GTC + EA deletion
+bool     g_confirmed[2];                 // CLOSE mode: a candle closed beyond the level
+bool     g_confInit = false;             // CLOSE mode: candles before EntryStart checked today
+datetime g_lastConfBar = 0;              // CLOSE mode: last closed candle looked at
+datetime g_lastTrailLog = 0;
 
 //+------------------------------------------------------------------+
 //|  Helpers                                                          |
@@ -304,7 +327,9 @@ void NewDay(const datetime today)
    g_levelsOk   = false;
    g_lastLevelTry = 0;
    g_lastWait   = "";
-   for(int s = 0; s < 2; s++) { g_side[s] = SIDE_WAIT; g_attempts[s] = 0; g_lastAttempt[s] = 0; }
+   for(int s = 0; s < 2; s++) { g_side[s] = SIDE_WAIT; g_attempts[s] = 0; g_lastAttempt[s] = 0; g_confirmed[s] = false; }
+   g_confInit    = false;
+   g_lastConfBar = 0;
    g_dayEnd     = (int)MathMin(g_endMin, SessionEndMinute(DayOfWeek(today)) - 5);
    if(g_dayEnd < g_endMin)
       PrintFormat("Session ends early today - day end moved to %s", HHMM(g_dayEnd));
@@ -449,6 +474,88 @@ void PlaceSide(const int s)
    if(g_attempts[s] >= MAX_ATTEMPTS) { g_side[s] = SIDE_DONE; PrintFormat("%s given up for today", name); }
   }
 
+//+------------------------------------------------------------------+
+//|  CLOSE mode: candle-close confirmation + market order            |
+//+------------------------------------------------------------------+
+// Looks at newly closed ConfirmTF candles of today and marks sides as confirmed (or done).
+void UpdateConfirmations()
+  {
+   int    per   = PeriodSeconds(InpConfirmTF);
+   datetime startT = g_day + g_startMin * 60;
+   if(!g_confInit)
+     {
+      g_confInit = true;
+      // a gap open beyond a level: that side is not traded today
+      MqlRates first[];
+      if(CopyRates(_Symbol, PERIOD_M1, g_day, g_day + 3599, first) > 0)
+        {
+         if(first[0].open >= g_pdh && g_side[0] == SIDE_WAIT) { g_side[0] = SIDE_DONE; Print("BUY side skipped: the day opened above PDH"); }
+         if(first[0].open <= g_pdl && g_side[1] == SIDE_WAIT) { g_side[1] = SIDE_DONE; Print("SELL side skipped: the day opened below PDL"); }
+        }
+      // candles that closed beyond a level before EntryStart: that side is not traded today
+      MqlRates r[];
+      int n = CopyRates(_Symbol, InpConfirmTF, g_day, TimeCurrent(), r);
+      for(int i = 0; i < n; i++)
+        {
+         if(r[i].time < g_day || r[i].time + per > startT || r[i].time + per > TimeCurrent()) continue;
+         if(r[i].close > g_pdh && g_side[0] == SIDE_WAIT)
+           { g_side[0] = SIDE_DONE; PrintFormat("BUY side skipped: a %s candle closed above PDH at %s, before the entry start", EnumToString(InpConfirmTF), TimeToString(r[i].time + per, TIME_MINUTES)); }
+         if(r[i].close < g_pdl && g_side[1] == SIDE_WAIT)
+           { g_side[1] = SIDE_DONE; PrintFormat("SELL side skipped: a %s candle closed below PDL at %s, before the entry start", EnumToString(InpConfirmTF), TimeToString(r[i].time + per, TIME_MINUTES)); }
+        }
+     }
+   datetime barTime = iTime(_Symbol, InpConfirmTF, 1);           // last closed candle
+   if(barTime == 0 || barTime == g_lastConfBar) return;
+   g_lastConfBar = barTime;
+   if(barTime < g_day || barTime + per <= startT) return;          // yesterday / before the entry start
+   double close = iClose(_Symbol, InpConfirmTF, 1);
+   if(g_side[0] == SIDE_WAIT && !g_confirmed[0] && close > g_pdh)
+     { g_confirmed[0] = true; PrintFormat("BUY confirmed: %s candle closed at %.*f above PDH %.*f", EnumToString(InpConfirmTF), _Digits, close, _Digits, g_pdh); }
+   if(g_side[1] == SIDE_WAIT && !g_confirmed[1] && close < g_pdl)
+     { g_confirmed[1] = true; PrintFormat("SELL confirmed: %s candle closed at %.*f below PDL %.*f", EnumToString(InpConfirmTF), _Digits, close, _Digits, g_pdl); }
+  }
+
+// Market order for a confirmed side. SL / TP are measured from the actual entry price.
+void OpenMarket(const int s)
+  {
+   bool   buy  = (s == 0);
+   string name = buy ? "BUY (close above PDH)" : "SELL (close below PDL)";
+   double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   // price fell back inside the levels: the confirmation is void, wait for a new close beyond
+   if(buy ? bid <= g_pdh : bid >= g_pdl)
+     {
+      g_confirmed[s] = false;
+      PrintFormat("%s cancelled: price %.*f is back inside the level - waiting for a new candle close", name, _Digits, bid);
+      return;
+     }
+   double minD = MinStopDistance();
+   if(InpSL <= minD || InpTP <= minD)
+     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, InpSL, _Digits, InpTP, _Digits, minD); return; }
+   double entry = buy ? ask : bid;
+   double sl = NormPrice(buy ? entry - InpSL : entry + InpSL);
+   double tp = NormPrice(buy ? entry + InpTP : entry - InpTP);
+   if(sl <= 0.0 || tp <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL/TP at or below zero", name); return; }
+   string why = "";
+   double lot = LotForRisk(buy, entry, sl, why);
+   if(lot <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: %s", name, why); return; }
+
+   g_attempts[s]++;
+   g_lastAttempt[s] = TimeCurrent();
+   bool ok = buy ? g_trade.Buy(lot, _Symbol, 0.0, sl, tp, "PDH close breakout")
+                 : g_trade.Sell(lot, _Symbol, 0.0, sl, tp, "PDL close breakout");
+   uint rc = g_trade.ResultRetcode();
+   if(ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_DONE_PARTIAL || rc == TRADE_RETCODE_PLACED))
+     {
+      g_side[s] = SIDE_DONE;
+      g_lastWait = "";
+      PrintFormat("%s sent: %.2f lots @ ~%.*f  SL %.*f  TP %.*f  (risk %.2f%%)", name, lot, _Digits, entry, _Digits, sl, _Digits, tp, InpRiskPct);
+      return;
+     }
+   PrintFormat("%s REJECTED (attempt %d/%d): %u %s", name, g_attempts[s], MAX_ATTEMPTS, rc, g_trade.ResultRetcodeDescription());
+   if(g_attempts[s] >= MAX_ATTEMPTS) { g_side[s] = SIDE_DONE; PrintFormat("%s given up for today", name); }
+  }
+
 // Entry logic, called on every tick inside the trading part of the day.
 void ManageEntries()
   {
@@ -480,6 +587,12 @@ void ManageEntries()
 
    bool needPlace = (g_side[0] == SIDE_WAIT || g_side[1] == SIDE_WAIT);
    if(!needPlace) { g_status = "orders live"; return; }
+   if(InpEntryMode == ENTRY_CLOSE)
+     {
+      UpdateConfirmations();
+      if(!g_confirmed[0] && !g_confirmed[1])
+        { g_status = "waiting for a " + EnumToString(InpConfirmTF) + " close beyond PDH / PDL"; return; }
+     }
 
    // gates that only delay placing (re-checked on later ticks)
    long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
@@ -495,10 +608,51 @@ void ManageEntries()
      { Wait(StringFormat("%d positions open with this magic (max %d)", CountPositions(true), InpMaxPositions)); return; }
 
    for(int s = 0; s < 2; s++)
-      if(g_side[s] == SIDE_WAIT && TimeCurrent() - g_lastAttempt[s] >= 5) PlaceSide(s);
+     {
+      if(g_side[s] != SIDE_WAIT || TimeCurrent() - g_lastAttempt[s] < 5) continue;
+      if(InpEntryMode == ENTRY_STOP) PlaceSide(s);
+      else if(g_confirmed[s] && CountPositions(false) == 0) OpenMarket(s);
+     }
+   if(InpEntryMode == ENTRY_CLOSE) { g_status = "confirmed - entering at market"; return; }
 
    int live = (g_side[0] == SIDE_PLACED ? 1 : 0) + (g_side[1] == SIDE_PLACED ? 1 : 0);
    g_status = StringFormat("%d order(s) live", live);
+  }
+
+//+------------------------------------------------------------------+
+//|  Trailing stop (optional)                                         |
+//+------------------------------------------------------------------+
+void ManageTrailing()
+  {
+   if(InpTrailStart <= 0.0 || InpTrailDist <= 0.0) return;
+   double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double minD = MinStopDistance();
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double step = MathMax(tick > 0.0 ? tick : _Point, InpTrailDist * 0.1);   // move in steps of >= 10% of the distance
+   double freeze = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsOurs(PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL))) continue;
+      bool   buy    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double tp     = PositionGetDouble(POSITION_TP);
+      double profit = buy ? bid - open : open - ask;
+      if(profit < InpTrailStart) continue;
+      double newSL = NormPrice(buy ? bid - InpTrailDist : ask + InpTrailDist);
+      if(sl != 0.0 && (buy ? newSL < sl + step : newSL > sl - step)) continue;            // not enough improvement
+      if(buy ? bid - newSL < minD : newSL - ask < minD) continue;                          // broker minimum distance
+      if(freeze > 0.0 && sl != 0.0 && (buy ? bid - sl : sl - ask) <= freeze) continue;     // SL inside the freeze level
+      if(g_trade.PositionModify(t, newSL, tp))
+         PrintFormat("Trailing SL: %.*f -> %.*f (profit %.*f)", _Digits, sl, _Digits, newSL, _Digits, profit);
+      else if(TimeCurrent() - g_lastTrailLog >= 60)
+        {
+         g_lastTrailLog = TimeCurrent();
+         PrintFormat("Trailing SL to %.*f REJECTED: %u %s", _Digits, newSL, g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -529,6 +683,9 @@ int OnInit()
    if(g_startMin < 0 || g_endMin < 0 || g_endMin <= g_startMin) bad = "EntryStart / DayEnd must be HH:MM with start before end";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)               bad = "RiskPct must be > 0 and <= 5";
    else if(InpSL <= 0.0 || InpTP <= 0.0)                         bad = "SL and TP must be > 0 (price distance)";
+   else if(InpTrailStart < 0.0 || InpTrailDist < 0.0)           bad = "TrailStart and TrailDist must be >= 0";
+   else if(InpTrailStart > 0.0 && InpTrailDist <= 0.0)          bad = "TrailDist must be > 0 when trailing is on";
+   else if(InpEntryMode == ENTRY_CLOSE && PeriodSeconds(InpConfirmTF) > 4 * 3600) bad = "ConfirmTF must be H4 or lower";
    else if(InpMaxSpreadPctSL < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
       bad = "MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
    if(bad != "") { Print("INVALID INPUT: ", bad); return INIT_PARAMETERS_INCORRECT; }
@@ -540,13 +697,18 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.10 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.20 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
                SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL));
    PrintFormat("Rules: risk %.2f%% | SL %.*f | TP %.*f (price distance) | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
                InpRiskPct, _Digits, InpSL, _Digits, InpTP, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
+   PrintFormat("Entry: %s%s | trailing: %s", InpEntryMode == ENTRY_STOP ? "stop orders at PDH / PDL" : "candle close beyond the level, ",
+               InpEntryMode == ENTRY_STOP ? "" : EnumToString(InpConfirmTF),
+               InpTrailStart > 0.0 ? StringFormat("starts at %.*f profit, distance %.*f", _Digits, InpTrailStart, _Digits, InpTrailDist) : "off");
+   if(InpTrailStart > 0.0 && InpTrailDist <= MinStopDistance())
+      PrintFormat("WARNING: TrailDist %.*f is not above the broker's minimum stop distance %.*f - the SL cannot follow price", _Digits, InpTrailDist, _Digits, MinStopDistance());
    return INIT_SUCCEEDED;
   }
 
@@ -579,6 +741,8 @@ void OnTick()
         }
       if(newest > 0 && g_trade.PositionClose(newest)) PrintFormat("Position #%I64u closed: second fill on the same day (one trade per day)", newest);
      }
+
+   ManageTrailing();
 
    // day end: nothing is held after it
    if(mins >= g_dayEnd)

@@ -74,7 +74,7 @@ def levels(D, min_bars=360, atr_n=14):
 
 @njit(cache=True)
 def _sim(t, o, h, l, c, s, e, pdh, pdl, atr, entry, tf, sl_atr, rr, buf_atr, oco,
-         win_a, win_b, retest_max, sides, out):
+         win_a, win_b, retest_max, sides, trail_start, trail_dist, out):
     # out columns: day, side, t_entry, entry, exit, dist, reason(1 SL 2 TP 3 EOD), fill_kind(0 stop/mkt 1 limit), bars_held
     k = 0
     for d in range(len(s)):
@@ -114,6 +114,12 @@ def _sim(t, o, h, l, c, s, e, pdh, pdl, atr, entry, tf, sl_atr, rr, buf_atr, oco
                     why = 2
                 elif i == last:
                     xp = c[i]; why = 3
+                # trailing stop: moved after this bar's exit checks, used from the next bar on
+                if why == 0 and trail_start > 0:
+                    if pos == 1 and h[i] - ep >= trail_start and h[i] - trail_dist > sl:
+                        sl = h[i] - trail_dist
+                    if pos == -1 and ep - l[i] >= trail_start and l[i] + trail_dist < sl:
+                        sl = l[i] + trail_dist
                 if why > 0:
                     out[k, 0] = d; out[k, 1] = pos; out[k, 2] = t[ent_i]; out[k, 3] = ep
                     out[k, 4] = xp; out[k, 5] = dist; out[k, 6] = why; out[k, 7] = kind
@@ -191,13 +197,14 @@ def _sim(t, o, h, l, c, s, e, pdh, pdl, atr, entry, tf, sl_atr, rr, buf_atr, oco
 
 
 def run(D, lv, entry=0, tf=60, sl_atr=0.5, rr=1.0, buf_atr=0.0, oco=True, win=(0, 1440),
-        retest_max=0, sides=0, cost_mult=1.0, max_rng_atr=0.0):
+        retest_max=0, sides=0, cost_mult=1.0, max_rng_atr=0.0, trail=(0.0, 0.0)):
     pdh, pdl, atr = lv
     if max_rng_atr > 0:
         pdh = np.where((pdh - pdl) > max_rng_atr * atr, np.nan, pdh)
     out = np.zeros((2 * len(D["s"]) + 10, 9))
     k = _sim(D["t"], D["o"], D["h"], D["l"], D["c"], D["s"], D["e"], pdh, pdl, atr,
-             entry, tf, sl_atr, rr, buf_atr, oco, win[0], win[1], retest_max, sides, out)
+             entry, tf, sl_atr, rr, buf_atr, oco, win[0], win[1], retest_max, sides,
+             trail[0] * 1.0, trail[1] * 1.0, out)
     T = pd.DataFrame(out[:k], columns=["d", "side", "te", "ep", "xp", "dist", "why", "kind", "bars"])
     spread, slip = COSTS[D["ins"]]
     gross = T.side * (T.xp - T.ep)

@@ -232,3 +232,31 @@ None of these is statistically different from zero, and the sign flips between p
 a different risk as prices move (50 NAS points was ~1 % of price in 2016 and ~0.25 % today), so values that work in one
 year will not mean the same thing a few years later. Re-check SL/TP on recent data for each symbol and keep them in
 proportion to the symbol's normal daily range.
+
+## Update: EA v2.20 adds optional confirmation entry and trailing stop
+
+New inputs (group "Confirmation and trailing"):
+
+* `InpEntryMode`: `ENTRY_STOP` (default) = stop orders at PDH/PDL. `ENTRY_CLOSE` = a candle of `InpConfirmTF`
+  (default M15) must **close** beyond the level. Then a market order is sent, but only while price is still beyond
+  the level; if price falls back inside first, the EA waits for a new close beyond. A candle that closed beyond the
+  level before `EntryStart`, or a day that opens beyond it, skips that side for the day. SL/TP are measured from the
+  actual fill price.
+* `InpTrailStart` / `InpTrailDist`: once the trade is `TrailStart` in profit (price distance), the SL follows price at
+  `TrailDist`. It moves only in the trade's favour, in steps of at least 10 % of the distance, and respects the
+  broker's stop and freeze levels. `TrailStart = 0` turns trailing off (default).
+
+Both are **off by default** because the tests did not support them. Backtest with fixed SL/TP, 02:00 start, net of
+costs, IS 2005–12 / VAL 2013–16 / OOS 2017–20 (`research/pdh_pdl/results/6_fixed_sl_confirmation_trailing.txt`):
+
+| Symbol (SL/TP) | Stop entry | M15 close confirmation | H1 close confirmation |
+|---|---|---|---|
+| NAS100 (50/100) | −0.008 / −0.013 / +0.037 | −0.013 / −0.030 / −0.007 | −0.012 / −0.029 / −0.033 |
+| XAUUSD ($5/$10) | +0.102 / +0.044 / −0.078 | +0.013 / +0.012 / −0.076 | +0.028 / +0.022 / −0.063 |
+| EURUSD (20/40 pips) | −0.009 / −0.011 / −0.036 | −0.098 / −0.113 / −0.078 | −0.086 / −0.112 / −0.079 |
+
+Confirmation is worse in almost every period: the entry comes after the move has started. Trailing (start/distance
+of 1× or 0.5× the SL) helped in some periods and hurt in others, for example XAU with a 1×SL trail:
++0.117 / +0.057 / −0.058 vs. +0.102 / +0.044 / −0.078 without. NAS100 with a 1×SL trail: −0.007 / −0.020 / +0.024
+vs. −0.008 / −0.013 / +0.037. There is no consistent improvement. If you use either, test it on your broker's data
+first, and judge it on a period you did not tune it on.
