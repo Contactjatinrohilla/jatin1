@@ -42,7 +42,14 @@ jobs:
         shell: pwsh
         run: |
           $me  = "C:\Program Files\MetaTrader 5\MetaEditor64.exe"
-          $inc = "C:\Program Files\MetaTrader 5\MQL5"
+          # MetaEditor cuts /inc: at the first space, so copy the standard
+          # MQL5 folder (Include\Trade\Trade.mqh etc.) to a path without spaces
+          $inc = "$env:RUNNER_TEMP\MQL5"
+          Copy-Item "C:\Program Files\MetaTrader 5\MQL5" $inc -Recurse -Force
+          if (-not (Test-Path "$inc\Include\Trade\Trade.mqh")) {
+            Write-Host "Trade.mqh not found in the installed MQL5 folder:"
+            Get-ChildItem -Recurse "C:\Program Files\MetaTrader 5" -Filter Trade.mqh | Select-Object FullName
+          }
           $files = "${{ github.event.inputs.files }}".Trim()
           if ($files) { $list = $files -split '\s+' }
           else { $list = Get-ChildItem -Recurse -Path ea -Filter *.mq5 | ForEach-Object { $_.FullName } }
