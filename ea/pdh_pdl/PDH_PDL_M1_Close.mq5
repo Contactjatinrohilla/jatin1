@@ -3,8 +3,14 @@
 //|                                                                  |
 //|  PDH_PDL_Breakout with the "NQ Breakout M1" settings built in:    |
 //|  an M1 candle must CLOSE beyond PDH / PDL, then a market order.   |
-//|  SL 50 / TP 100 (2:1), one trade a day, no spread filter.         |
-//|  Optimisation: SL 10-200 and TP 10-400, step 10.                  |
+//|  Stop loss (SLMode):                                              |
+//|   ATR   (default): SL = ATR(ATRPeriod, ATRTimeframe, last closed  |
+//|         candle) x ATRMult, TP = SL x RR - same RR on every trade, |
+//|         the distance follows volatility.                          |
+//|   FIXED : SL = InpSL, TP = InpTP (price distances).               |
+//|  One trade a day, no spread filter.                               |
+//|  Optimisation: SL 10-200 / TP 10-400 step 10, ATR mult 0.5-5      |
+//|  step 0.25, RR 1-5 step 0.5.                                      |
 //|  For a lower spread backtest, make a copy of the symbol with      |
 //|  SB_MakeSpreadSymbol and test on that copy.                       |
 //|                                                                  |
@@ -44,8 +50,8 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL M1 Close"
-#property version   "1.00"
-#property description "PDH/PDL breakout: M1 candle close beyond the level, then market order. SL 50 / TP 100, no spread filter."
+#property version   "1.10"
+#property description "PDH/PDL breakout: M1 candle close beyond the level, then market order. ATR or fixed SL, TP = SL x RR, no spread filter."
 
 #include <Trade\Trade.mqh>
 
@@ -55,14 +61,25 @@ enum ENUM_ENTRY_MODE
    ENTRY_CLOSE = 1    // Confirmation: candle closes beyond the level, then market order
   };
 
+enum ENUM_SL_MODE
+  {
+   SLM_FIXED = 0,     // Fixed: SL = InpSL, TP = InpTP
+   SLM_ATR   = 1      // ATR: SL = ATR x ATRMult, TP = SL x RR
+  };
+
 input group "=== Risk ==="
 input double InpRiskPct         = 0.5;     // Risk per trade, % of balance
 input double InpMaxDailyLossPct = 2.0;     // No new entries today after this % loss, all symbols with this magic (0 = off)
 input int    InpMaxPositions    = 3;       // Max open positions with this magic, all symbols (0 = no limit)
 
 input group "=== Strategy ==="
-input double InpSL              = 50.0;    // Stop loss, price distance (NAS100 50 = 50 points, XAUUSD 5 = $5, EURUSD 0.002 = 20 pips)
-input double InpTP              = 100.0;   // Take profit, price distance (same units as the stop loss)
+input ENUM_SL_MODE InpSLMode    = SLM_ATR; // Stop loss type
+input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_M15; // ATR: timeframe
+input int    InpATRPeriod       = 14;      // ATR: period
+input double InpATRMult         = 1.5;     // ATR: SL = ATR x this
+input double InpRR              = 2.0;     // ATR: TP = SL x this
+input double InpSL              = 50.0;    // FIXED: stop loss, price distance (NAS100 50 = 50 points, XAUUSD 5 = $5, EURUSD 0.002 = 20 pips)
+input double InpTP              = 100.0;   // FIXED: take profit, price distance (same units as the stop loss)
 input string InpEntryStart      = "02:00"; // No orders before this server time (rollover spreads)
 input string InpDayEnd          = "23:50"; // Close trades and delete orders at this server time
 input double InpMaxSpreadPctSL  = 0.0;     // Wait while the spread is above this % of the stop distance (0 = off)
@@ -110,6 +127,7 @@ bool     g_confirmed[2];                 // CLOSE mode: a candle closed beyond t
 bool     g_confInit = false;             // CLOSE mode: candles before EntryStart checked today
 datetime g_lastConfBar = 0;              // CLOSE mode: last closed candle looked at
 datetime g_lastTrailLog = 0;
+int      g_atr = INVALID_HANDLE;         // ATR handle (ATR mode)
 
 //+------------------------------------------------------------------+
 //|  Helpers                                                          |
@@ -384,6 +402,21 @@ void PrepareLevels()
   }
 
 //+------------------------------------------------------------------+
+//|  Stop loss / take profit distances                                |
+//+------------------------------------------------------------------+
+// SL and TP price distances for a new trade. false = ATR not ready yet (why says so).
+bool StopDistances(double &sl, double &tp, string &why)
+  {
+   if(InpSLMode == SLM_FIXED) { sl = InpSL; tp = InpTP; return true; }
+   double atr[];
+   if(CopyBuffer(g_atr, 0, 1, 1, atr) != 1 || atr[0] <= 0.0)
+     { why = "ATR not ready yet (history loading)"; return false; }
+   sl = NormPrice(atr[0] * InpATRMult);
+   tp = NormPrice(sl * InpRR);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //|  Orders                                                           |
 //+------------------------------------------------------------------+
 // Lot size so that a stop-out loses InpRiskPct % of the balance (never more). 0 = cannot trade.
@@ -444,17 +477,18 @@ void PlaceSide(const int s)
 
    // a buy stop triggers on Ask: add the spread so it fills when the bid breaks PDH
    double entry = buy ? NormPrice(g_pdh + (ask - bid)) : NormPrice(g_pdl);
-   double dist  = InpSL;
+   double dist = 0.0, tpDist = 0.0;
+   string why  = "";
+   if(!StopDistances(dist, tpDist, why)) { Wait(why); return; }
    double minD  = MinStopDistance();
-   if(dist <= minD || InpTP <= minD)
-     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, dist, _Digits, InpTP, _Digits, minD); return; }
+   if(dist <= minD || tpDist <= minD)
+     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, dist, _Digits, tpDist, _Digits, minD); return; }
    if(buy ? entry - ask < minD : bid - entry < minD) { Wait(name + " too close to price for a stop order"); return; }
 
    double sl = NormPrice(buy ? entry - dist : entry + dist);
-   double tp = NormPrice(buy ? entry + InpTP : entry - InpTP);
+   double tp = NormPrice(buy ? entry + tpDist : entry - tpDist);
    if(sl <= 0.0 || tp <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL/TP at or below zero", name); return; }
 
-   string why = "";
    double lot = LotForRisk(buy, entry, sl, why);
    if(lot <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: %s", name, why); return; }
 
@@ -543,14 +577,16 @@ void OpenMarket(const int s)
       PrintFormat("%s cancelled: price %.*f is back inside the level - waiting for a new candle close", name, _Digits, bid);
       return;
      }
-   double minD = MinStopDistance();
-   if(InpSL <= minD || InpTP <= minD)
-     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, InpSL, _Digits, InpTP, _Digits, minD); return; }
-   double entry = buy ? ask : bid;
-   double sl = NormPrice(buy ? entry - InpSL : entry + InpSL);
-   double tp = NormPrice(buy ? entry + InpTP : entry - InpTP);
-   if(sl <= 0.0 || tp <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL/TP at or below zero", name); return; }
+   double slDist = 0.0, tpDist = 0.0;
    string why = "";
+   if(!StopDistances(slDist, tpDist, why)) { Wait(why); return; }
+   double minD = MinStopDistance();
+   if(slDist <= minD || tpDist <= minD)
+     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, slDist, _Digits, tpDist, _Digits, minD); return; }
+   double entry = buy ? ask : bid;
+   double sl = NormPrice(buy ? entry - slDist : entry + slDist);
+   double tp = NormPrice(buy ? entry + tpDist : entry - tpDist);
+   if(sl <= 0.0 || tp <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL/TP at or below zero", name); return; }
    double lot = LotForRisk(buy, entry, sl, why);
    if(lot <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: %s", name, why); return; }
 
@@ -615,7 +651,9 @@ void ManageEntries()
    if(mode == SYMBOL_TRADE_MODE_SHORTONLY && g_side[0] == SIDE_WAIT) { g_side[0] = SIDE_DONE; Print("BUY side skipped: broker allows short only"); }
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) { Wait("algo trading is switched off in the terminal"); return; }
    if(!SessionOpenNow()) { Wait("symbol's trade session is closed"); return; }
-   double spread = Spread(), dist = InpSL;
+   double spread = Spread(), dist = 0.0, tpDist = 0.0;
+   string sdWhy = "";
+   if(!StopDistances(dist, tpDist, sdWhy)) { Wait(sdWhy); return; }
    if(InpMaxSpreadPctSL > 0.0 && spread > dist * InpMaxSpreadPctSL / 100.0)
      { Wait(StringFormat("spread %.*f is above %.1f%% of the stop distance %.*f", _Digits, spread, InpMaxSpreadPctSL, _Digits, dist)); return; }
    if(InpMaxPositions > 0 && CountPositions(true) >= InpMaxPositions)
@@ -712,7 +750,9 @@ int OnInit()
    string bad = "";
    if(g_startMin < 0 || g_endMin < 0 || g_endMin <= g_startMin) bad = "EntryStart / DayEnd must be HH:MM with start before end";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)               bad = "RiskPct must be > 0 and <= 5";
-   else if(InpSL <= 0.0 || InpTP <= 0.0)                         bad = "SL and TP must be > 0 (price distance)";
+   else if(InpSLMode == SLM_FIXED && (InpSL <= 0.0 || InpTP <= 0.0)) bad = "SL and TP must be > 0 (price distance)";
+   else if(InpSLMode == SLM_ATR && (InpATRPeriod <= 0 || InpATRMult <= 0.0 || InpRR <= 0.0))
+      bad = "ATR period, ATR mult and RR must be > 0";
    else if(InpUseBreakeven && (InpBE_Trigger <= 0.0 || InpBE_Lock < 0.0 || InpBE_Lock >= InpBE_Trigger))
       bad = "Breakeven: trigger must be > 0 and lock between 0 and the trigger";
    else if(InpUseTrailing && (InpTrailStartDist < 0.0 || InpTrailBehind <= 0.0))
@@ -722,6 +762,12 @@ int OnInit()
       bad = "MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
    if(bad != "") { Print("INVALID INPUT: ", bad); return INIT_PARAMETERS_INCORRECT; }
 
+   if(InpSLMode == SLM_ATR)
+     {
+      g_atr = iATR(_Symbol, InpATRTimeframe, InpATRPeriod);
+      if(g_atr == INVALID_HANDLE) { Print("Could not create the ATR indicator, error ", GetLastError()); return INIT_FAILED; }
+     }
+
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
    g_trade.SetDeviationInPoints(50);
@@ -729,13 +775,16 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_M1_Close 1.00 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_M1_Close 1.10 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
                SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL));
-   PrintFormat("Rules: risk %.2f%% | SL %.*f | TP %.*f (price distance) | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
-               InpRiskPct, _Digits, InpSL, _Digits, InpTP, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
+   string stops = (InpSLMode == SLM_ATR)
+                  ? StringFormat("SL ATR(%d, %s) x %.2f, TP = SL x %.2f", InpATRPeriod, EnumToString(InpATRTimeframe), InpATRMult, InpRR)
+                  : StringFormat("SL %.*f | TP %.*f (price distance)", _Digits, InpSL, _Digits, InpTP);
+   PrintFormat("Rules: risk %.2f%% | %s | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
+               InpRiskPct, stops, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
    PrintFormat("Breakeven: %s", InpUseBreakeven ? StringFormat("at %.*f profit, SL to entry + %.*f", _Digits, InpBE_Trigger, _Digits, InpBE_Lock) : "off");
    PrintFormat("Entry: %s%s | trailing: %s", InpEntryMode == ENTRY_STOP ? "stop orders at PDH / PDL" : "candle close beyond the level, ",
                InpEntryMode == ENTRY_STOP ? "" : EnumToString(InpConfirmTF),
@@ -748,6 +797,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    Comment("");
+   if(g_atr != INVALID_HANDLE) { IndicatorRelease(g_atr); g_atr = INVALID_HANDLE; }
    if(!MQLInfoInteger(MQL_OPTIMIZATION) && reason == REASON_REMOVE) { ObjectDelete(0, "PDH"); ObjectDelete(0, "PDL"); }
   }
 
@@ -836,7 +886,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 //+------------------------------------------------------------------+
 //|  Optimisation                                                     |
 //+------------------------------------------------------------------+
-// SL and TP: start 10, step 10 whatever the Inputs table shows (SL up to 200, TP up to 400).
+// Whatever the Inputs table shows: SL 10-200 / TP 10-400 step 10 (FIXED), ATR mult 0.5-5 step 0.25, RR 1-5 step 0.5 (ATR).
 // Only the boxes you tick are optimised; the other inputs keep their value.
 void Range(const string name, const double start, const double step, const double stop)
   {
@@ -850,7 +900,9 @@ int OnTesterInit()
   {
    Range("InpSL", 10.0, 10.0, 200.0);
    Range("InpTP", 10.0, 10.0, 400.0);
-   Print("Optimisation ranges: SL 10-200 and TP 10-400, step 10");
+   Range("InpATRMult", 0.5, 0.25, 5.0);
+   Range("InpRR", 1.0, 0.5, 5.0);
+   Print("Optimisation ranges: SL 10-200 and TP 10-400 step 10, ATR mult 0.5-5 step 0.25, RR 1-5 step 0.5");
    return INIT_SUCCEEDED;
   }
 
