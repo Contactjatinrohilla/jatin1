@@ -260,3 +260,12 @@ of 1× or 0.5× the SL) helped in some periods and hurt in others, for example X
 +0.117 / +0.057 / −0.058 vs. +0.102 / +0.044 / −0.078 without. NAS100 with a 1×SL trail: −0.007 / −0.020 / +0.024
 vs. −0.008 / −0.013 / +0.037. There is no consistent improvement. If you use either, test it on your broker's data
 first, and judge it on a period you did not tune it on.
+
+## Update: EA v2.30 adds an optional breakeven
+
+`InpUseBreakeven` (off by default), `InpBE_Trigger`, `InpBE_Lock`: when the trade is `BE_Trigger` in profit (price
+distance), the SL moves to entry + `BE_Lock`. If both breakeven and trailing are on, the EA uses whichever SL is
+better for the trade. `ea/pdh_pdl/PDH_PDL_Breakout_BE_trail_from_1.set` loads optimisation ranges that start at
+1 point (step 1, stop 200) for the breakeven trigger/lock and the trailing start/distance. Breakeven has not been
+backtested in this study; the earlier XAUUSD report found a 1R breakeven did not fix a negative expectancy. Any value
+found by optimising these four inputs has to be checked on a later period that was not used for the optimisation.
