@@ -211,3 +211,24 @@ the inputs on that period.
 * `ea/pdh_pdl/PDH_PDL_Breakout.mq5`: the new EA (9 inputs). The reference EA is unchanged in `ea/nas/`.
 * `research/pdh_pdl/`: backtester (`bt.py`), study scripts, `fetch_data.sh`, `run_all.sh`, and `results/` (raw output
   of every table above).
+
+## Update: EA v2.10 uses fixed SL/TP (no ATR)
+
+At your request, the EA now uses a **fixed stop loss and take profit in price distance** (`InpSL`, `InpTP`, set per
+symbol) and the ATR range filter has been removed. Everything else is unchanged: 02:00 start, OCO, one trade per day,
+day-end close, risk sizing and the protections.
+
+The same backtest with fixed distances (02:00 start, no range filter, net of costs):
+
+| Symbol | SL / TP | 2010–2016 | 2017–2020 |
+|---|---|---|---|
+| NAS100 | 50 / 100 pts | −0.004R (PF 0.98) | +0.037R (PF 1.10, t 0.9) |
+| NAS100 | 25 / 50 pts | −0.008R (PF 0.98) | +0.013R (PF 1.02) |
+| XAUUSD | $5 / $10 | +0.047R (PF 1.08) | −0.078R (PF 0.86) |
+| XAUUSD | $10 / $20 | +0.031R (PF 1.08) | −0.025R (PF 0.92) |
+| EURUSD | 20 / 40 pips | +0.004R (PF 1.01) | −0.036R (PF 0.94) |
+
+None of these is statistically different from zero, and the sign flips between periods. A fixed distance also means
+a different risk as prices move (50 NAS points was ~1 % of price in 2016 and ~0.25 % today), so values that work in one
+year will not mean the same thing a few years later. Re-check SL/TP on recent data for each symbol and keep them in
+proportion to the symbol's normal daily range.

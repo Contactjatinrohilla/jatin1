@@ -7,30 +7,28 @@
 //|                                                                  |
 //|   Levels  PDH / PDL = high / low of the last COMPLETE server day  |
 //|           with at least 6 hours of M1 data (Sunday stubs are       |
-//|           skipped). ATR = average true range of the 14 complete    |
-//|           days before today. Nothing from today is used.           |
-//|   Filter  No trade today if PDH - PDL > MaxRangeATR x ATR.         |
+//|           skipped). Nothing from today is used.                    |
 //|   Entry   From EntryStart (default 02:00 server, after the         |
 //|           rollover spreads) a BUY STOP at PDH and a SELL STOP at   |
 //|           PDL. A side is skipped if today's price already touched  |
 //|           its level before the order could be placed.              |
-//|   Exit    SL = SL_ATR x ATR from the order price, TP = RR x SL.    |
+//|   Exit    Fixed SL and TP distances from the order price.          |
 //|           Anything still open at DayEnd is closed; unfilled        |
 //|           orders are deleted. No overnight / weekend holding.      |
 //|   Limits  First fill cancels the other order (OCO). At most one    |
 //|           trade per symbol per server day, also after restarts.    |
 //|           Optional account-wide daily loss stop and max positions. |
 //|                                                                  |
-//|  All distances scale with ATR, so the same inputs work on FX,     |
-//|  gold, indices and crypto. Position size comes from the money     |
-//|  lost at the stop (OrderCalcProfit = tick value, contract size    |
-//|  and account currency handled by the terminal).                   |
+//|  SL / TP are PRICE distances, set per symbol: XAUUSD 5.0 = $5,    |
+//|  NAS100 50 = 50 index points, EURUSD 0.0020 = 20 pips. Position   |
+//|  size comes from the money lost at the stop (OrderCalcProfit =    |
+//|  tick value, contract size and account currency).                 |
 //|  All times are SERVER time (Market Watch clock). The study used   |
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.00"
-#property description "Previous-day high/low breakout with ATR stops. Research and limits: reports/PDH_PDL_Research.md"
+#property version   "2.10"
+#property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
 
@@ -40,16 +38,14 @@ input double InpMaxDailyLossPct = 2.0;     // No new entries today after this % 
 input int    InpMaxPositions    = 3;       // Max open positions with this magic, all symbols (0 = no limit)
 
 input group "=== Strategy ==="
-input double InpSL_ATR          = 1.0;     // Stop loss = daily ATR(14) x this
-input double InpRR              = 2.0;     // Take profit = stop distance x this
-input double InpMaxRangeATR     = 1.0;     // Skip the day if yesterday's range > ATR x this (0 = off)
+input double InpSL              = 50.0;    // Stop loss, price distance (NAS100 50 = 50 points, XAUUSD 5 = $5, EURUSD 0.002 = 20 pips)
+input double InpTP              = 100.0;   // Take profit, price distance (same units as the stop loss)
 input string InpEntryStart      = "02:00"; // No orders before this server time (rollover spreads)
 input string InpDayEnd          = "23:50"; // Close trades and delete orders at this server time
 input double InpMaxSpreadPctSL  = 10.0;    // Wait while the spread is above this % of the stop distance
 input ulong  InpMagic           = 7710001; // Magic number
 
 //--- fixed rules (part of the tested strategy, not meant to be tuned)
-#define ATR_DAYS        14      // days in the ATR
 #define MIN_DAY_M1_BARS 360     // a day needs >= 6 h of M1 bars to count as complete
 #define MAX_LEVEL_AGE   4       // calendar days; older levels (long holiday) are not traded
 #define MAX_ATTEMPTS    5       // order send attempts per side per day
@@ -65,7 +61,7 @@ datetime g_day = 0;                      // current server day
 int      g_dayEnd = 0;                   // today's real day end (minutes)
 bool     g_levelsOk = false;
 datetime g_lastLevelTry = 0;
-double   g_pdh = 0.0, g_pdl = 0.0, g_atr = 0.0;
+double   g_pdh = 0.0, g_pdl = 0.0;
 datetime g_levelDay = 0;
 bool     g_dayClosed = false;            // no more entries today (traded, filtered, loss stop, day end)
 int      g_side[2];                      // 0 = buy, 1 = sell
@@ -247,7 +243,7 @@ double TodayLossPct()
   }
 
 //+------------------------------------------------------------------+
-//|  Levels: PDH, PDL and ATR from complete earlier days only         |
+//|  Levels: PDH and PDL from the last complete earlier day           |
 //+------------------------------------------------------------------+
 bool DayIsComplete(const datetime dayTime)
   {
@@ -258,38 +254,19 @@ bool DayIsComplete(const datetime dayTime)
 bool ComputeLevels(const datetime today)
   {
    MqlRates d[];
-   int n = CopyRates(_Symbol, PERIOD_D1, 0, 3 * ATR_DAYS, d);   // oldest first
+   int n = CopyRates(_Symbol, PERIOD_D1, 0, 10, d);   // oldest first
    if(n <= 0) { g_status = "no daily history yet"; return false; }
-
-   // complete days before today, newest first
-   int idx[];
-   ArrayResize(idx, 0);
    for(int i = n - 1; i >= 0; i--)
      {
-      if(d[i].time >= today) continue;
-      if(!DayIsComplete(d[i].time)) continue;
-      int k = ArraySize(idx);
-      ArrayResize(idx, k + 1);
-      idx[k] = i;
-      if(k + 1 >= ATR_DAYS + 1) break;
+      if(d[i].time >= today) continue;          // today's unfinished candle
+      if(!DayIsComplete(d[i].time)) continue;   // Sunday stub / short holiday session
+      g_pdh      = d[i].high;
+      g_pdl      = d[i].low;
+      g_levelDay = d[i].time;
+      return true;
      }
-   if(ArraySize(idx) < ATR_DAYS + 1)
-     {
-      g_status = StringFormat("only %d complete daily candles - need %d", ArraySize(idx), ATR_DAYS + 1);
-      return false;
-     }
-   // ATR over the ATR_DAYS newest complete days (true range uses the previous complete day's close)
-   double sum = 0.0;
-   for(int k = 0; k < ATR_DAYS; k++)
-     {
-      double prevClose = d[idx[k + 1]].close;
-      sum += MathMax(d[idx[k]].high, prevClose) - MathMin(d[idx[k]].low, prevClose);
-     }
-   g_atr      = sum / ATR_DAYS;
-   g_pdh      = d[idx[0]].high;
-   g_pdl      = d[idx[0]].low;
-   g_levelDay = d[idx[0]].time;
-   return true;
+   g_status = "no complete previous daily candle";
+   return false;
   }
 
 void DrawLevel(const string name, const double price, const color clr)
@@ -354,24 +331,16 @@ void PrepareLevels()
 
    g_levelsOk = true;
    double range = g_pdh - g_pdl;
-   PrintFormat("=== %s | levels from %s | PDH %.*f  PDL %.*f  range %.*f = %.2f x ATR(%d) %.*f",
+   PrintFormat("=== %s | levels from %s | PDH %.*f  PDL %.*f  range %.*f",
                TimeToString(g_day, TIME_DATE), TimeToString(g_levelDay, TIME_DATE), _Digits, g_pdh, _Digits, g_pdl,
-               _Digits, range, g_atr > 0 ? range / g_atr : 0.0, ATR_DAYS, _Digits, g_atr);
+               _Digits, range);
    DrawLevel("PDH", g_pdh, clrDodgerBlue);
    DrawLevel("PDL", g_pdl, clrOrangeRed);
 
    if((long)(g_day - DayStart(g_levelDay)) > (long)MAX_LEVEL_AGE * 86400)
      { g_dayClosed = true; g_status = "levels too old"; Print("No trade today: previous complete day is more than ", MAX_LEVEL_AGE, " days ago (holiday / missing data)"); return; }
-   if(g_atr <= 0.0 || g_pdh <= g_pdl || g_pdl <= 0.0)
-     { g_dayClosed = true; g_status = "bad levels"; Print("No trade today: invalid levels or ATR - check the symbol's history"); return; }
-   if(InpMaxRangeATR > 0.0 && range > InpMaxRangeATR * g_atr)
-     {
-      g_dayClosed = true;
-      g_status = "skipped: wide previous day";
-      PrintFormat("No trade today: yesterday's range is %.2f x ATR (> %.2f) - breakouts after wide days tested negative",
-                  range / g_atr, InpMaxRangeATR);
-      return;
-     }
+   if(g_pdh <= g_pdl || g_pdl <= 0.0)
+     { g_dayClosed = true; g_status = "bad levels"; Print("No trade today: invalid levels - check the symbol's history"); return; }
    g_status = "levels ready";
   }
 
@@ -436,13 +405,14 @@ void PlaceSide(const int s)
 
    // a buy stop triggers on Ask: add the spread so it fills when the bid breaks PDH
    double entry = buy ? NormPrice(g_pdh + (ask - bid)) : NormPrice(g_pdl);
-   double dist  = InpSL_ATR * g_atr;
+   double dist  = InpSL;
    double minD  = MinStopDistance();
-   if(dist <= minD) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: stop distance %.*f is inside the broker minimum %.*f", name, _Digits, dist, _Digits, minD); return; }
+   if(dist <= minD || InpTP <= minD)
+     { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL %.*f or TP %.*f is inside the broker minimum distance %.*f", name, _Digits, dist, _Digits, InpTP, _Digits, minD); return; }
    if(buy ? entry - ask < minD : bid - entry < minD) { Wait(name + " too close to price for a stop order"); return; }
 
    double sl = NormPrice(buy ? entry - dist : entry + dist);
-   double tp = NormPrice(buy ? entry + dist * InpRR : entry - dist * InpRR);
+   double tp = NormPrice(buy ? entry + InpTP : entry - InpTP);
    if(sl <= 0.0 || tp <= 0.0) { g_side[s] = SIDE_DONE; PrintFormat("%s skipped: SL/TP at or below zero", name); return; }
 
    string why = "";
@@ -464,8 +434,8 @@ void PlaceSide(const int s)
      {
       g_side[s] = SIDE_PLACED;
       g_lastWait = "";
-      PrintFormat("%s placed: %.2f lots @ %.*f  SL %.*f  TP %.*f  (stop %.*f = %.2f ATR, risk %.2f%%)",
-                  name, lot, _Digits, entry, _Digits, sl, _Digits, tp, _Digits, dist, InpSL_ATR, InpRiskPct);
+      PrintFormat("%s placed: %.2f lots @ %.*f  SL %.*f  TP %.*f  (risk %.2f%%)",
+                  name, lot, _Digits, entry, _Digits, sl, _Digits, tp, InpRiskPct);
       return;
      }
    if(rc == TRADE_RETCODE_INVALID_EXPIRATION && ttype == ORDER_TIME_SPECIFIED)
@@ -518,7 +488,7 @@ void ManageEntries()
    if(mode == SYMBOL_TRADE_MODE_SHORTONLY && g_side[0] == SIDE_WAIT) { g_side[0] = SIDE_DONE; Print("BUY side skipped: broker allows short only"); }
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) { Wait("algo trading is switched off in the terminal"); return; }
    if(!SessionOpenNow()) { Wait("symbol's trade session is closed"); return; }
-   double spread = Spread(), dist = InpSL_ATR * g_atr;
+   double spread = Spread(), dist = InpSL;
    if(InpMaxSpreadPctSL > 0.0 && spread > dist * InpMaxSpreadPctSL / 100.0)
      { Wait(StringFormat("spread %.*f is above %.1f%% of the stop distance %.*f", _Digits, spread, InpMaxSpreadPctSL, _Digits, dist)); return; }
    if(InpMaxPositions > 0 && CountPositions(true) >= InpMaxPositions)
@@ -541,8 +511,8 @@ void UpdateComment()
    g_lastComment = TimeCurrent();
    string t = StringFormat("PDH/PDL Breakout  %s\n", _Symbol);
    if(g_levelsOk)
-      t += StringFormat("PDH %.*f  PDL %.*f  (from %s)  ATR %.*f  range/ATR %.2f\n", _Digits, g_pdh, _Digits, g_pdl,
-                        TimeToString(g_levelDay, TIME_DATE), _Digits, g_atr, (g_pdh - g_pdl) / g_atr);
+      t += StringFormat("PDH %.*f  PDL %.*f  (from %s)  range %.*f\n", _Digits, g_pdh, _Digits, g_pdl,
+                        TimeToString(g_levelDay, TIME_DATE), _Digits, g_pdh - g_pdl);
    t += StringFormat("Entries %s-%s server | status: %s\n", HHMM(g_startMin), HHMM(g_dayEnd), g_status);
    t += StringFormat("Positions %d (all symbols %d) | spread %.*f", CountPositions(false), CountPositions(true), _Digits, Spread());
    Comment(t);
@@ -558,10 +528,9 @@ int OnInit()
    string bad = "";
    if(g_startMin < 0 || g_endMin < 0 || g_endMin <= g_startMin) bad = "EntryStart / DayEnd must be HH:MM with start before end";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)               bad = "RiskPct must be > 0 and <= 5";
-   else if(InpSL_ATR <= 0.0)                                     bad = "SL_ATR must be > 0";
-   else if(InpRR <= 0.0)                                         bad = "RR must be > 0";
-   else if(InpMaxRangeATR < 0.0 || InpMaxSpreadPctSL < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
-      bad = "MaxRangeATR, MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
+   else if(InpSL <= 0.0 || InpTP <= 0.0)                         bad = "SL and TP must be > 0 (price distance)";
+   else if(InpMaxSpreadPctSL < 0.0 || InpMaxDailyLossPct < 0.0 || InpMaxPositions < 0)
+      bad = "MaxSpreadPctSL, MaxDailyLossPct and MaxPositions must be >= 0";
    if(bad != "") { Print("INVALID INPUT: ", bad); return INIT_PARAMETERS_INCORRECT; }
 
    g_trade.SetExpertMagicNumber(InpMagic);
@@ -571,13 +540,13 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.00 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.10 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
                SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL));
-   PrintFormat("Rules: risk %.2f%% | SL %.2f x ATR(%d) | TP %.2f R | skip if range > %.2f ATR | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
-               InpRiskPct, InpSL_ATR, ATR_DAYS, InpRR, InpMaxRangeATR, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
+   PrintFormat("Rules: risk %.2f%% | SL %.*f | TP %.*f (price distance) | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
+               InpRiskPct, _Digits, InpSL, _Digits, InpTP, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
    return INIT_SUCCEEDED;
   }
 
