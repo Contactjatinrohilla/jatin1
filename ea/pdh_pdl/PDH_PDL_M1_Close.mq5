@@ -8,6 +8,9 @@
 //|         candle) x ATRMult, TP = SL x RR - same RR on every trade, |
 //|         the distance follows volatility.                          |
 //|   FIXED : SL = InpSL, TP = InpTP (price distances).               |
+//|  Entries only between EntryStart and EntryEnd (default 15:00-     |
+//|  18:00 server = New York open; the backtest 2021-2026 lost in     |
+//|  every other hour). Open trades run until SL / TP / DayEnd.       |
 //|  One trade a day, no spread filter.                               |
 //|  Optimisation: SL 10-200 / TP 10-400 step 10, ATR mult 0.5-5      |
 //|  step 0.25, RR 1-5 step 0.5.                                      |
@@ -50,7 +53,7 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL M1 Close"
-#property version   "1.10"
+#property version   "1.20"
 #property description "PDH/PDL breakout: M1 candle close beyond the level, then market order. ATR or fixed SL, TP = SL x RR, no spread filter."
 
 #include <Trade\Trade.mqh>
@@ -80,7 +83,8 @@ input double InpATRMult         = 1.5;     // ATR: SL = ATR x this
 input double InpRR              = 2.0;     // ATR: TP = SL x this
 input double InpSL              = 50.0;    // FIXED: stop loss, price distance (NAS100 50 = 50 points, XAUUSD 5 = $5, EURUSD 0.002 = 20 pips)
 input double InpTP              = 100.0;   // FIXED: take profit, price distance (same units as the stop loss)
-input string InpEntryStart      = "02:00"; // No orders before this server time (rollover spreads)
+input string InpEntryStart      = "15:00"; // No new entries before this server time
+input string InpEntryEnd        = "18:00"; // No new entries from this server time (unfilled orders deleted, open trades keep running)
 input string InpDayEnd          = "23:50"; // Close trades and delete orders at this server time
 input double InpMaxSpreadPctSL  = 0.0;     // Wait while the spread is above this % of the stop distance (0 = off)
 input ulong  InpMagic           = 7720001; // Magic number
@@ -107,6 +111,7 @@ input double InpTrailBehind     = 50.0;    // Trailing SL stays this price dista
 
 CTrade   g_trade;
 int      g_startMin = 0, g_endMin = 0;   // inputs in minutes after server midnight
+int      g_entryEndMin = 0;              // no new entries from this minute
 datetime g_day = 0;                      // current server day
 int      g_dayEnd = 0;                   // today's real day end (minutes)
 bool     g_levelsOk = false;
@@ -735,7 +740,7 @@ void UpdateComment()
    if(g_levelsOk)
       t += StringFormat("PDH %.*f  PDL %.*f  (from %s)  range %.*f\n", _Digits, g_pdh, _Digits, g_pdl,
                         TimeToString(g_levelDay, TIME_DATE), _Digits, g_pdh - g_pdl);
-   t += StringFormat("Entries %s-%s server | status: %s\n", HHMM(g_startMin), HHMM(g_dayEnd), g_status);
+   t += StringFormat("Entries %s-%s server, close %s | status: %s\n", HHMM(g_startMin), HHMM(MathMin(g_entryEndMin, g_dayEnd)), HHMM(g_dayEnd), g_status);
    t += StringFormat("Positions %d (all symbols %d) | spread %.*f", CountPositions(false), CountPositions(true), _Digits, Spread());
    Comment(t);
   }
@@ -747,8 +752,11 @@ int OnInit()
   {
    g_startMin = ParseHHMM(InpEntryStart);
    g_endMin   = ParseHHMM(InpDayEnd);
+   g_entryEndMin = ParseHHMM(InpEntryEnd);
    string bad = "";
    if(g_startMin < 0 || g_endMin < 0 || g_endMin <= g_startMin) bad = "EntryStart / DayEnd must be HH:MM with start before end";
+   else if(g_entryEndMin < 0 || g_entryEndMin <= g_startMin || g_entryEndMin > g_endMin)
+      bad = "EntryEnd must be HH:MM, after EntryStart and not after DayEnd";
    else if(InpRiskPct <= 0.0 || InpRiskPct > 5.0)               bad = "RiskPct must be > 0 and <= 5";
    else if(InpSLMode == SLM_FIXED && (InpSL <= 0.0 || InpTP <= 0.0)) bad = "SL and TP must be > 0 (price distance)";
    else if(InpSLMode == SLM_ATR && (InpATRPeriod <= 0 || InpATRMult <= 0.0 || InpRR <= 0.0))
@@ -784,7 +792,7 @@ int OnInit()
                   ? StringFormat("SL ATR(%d, %s) x %.2f, TP = SL x %.2f", InpATRPeriod, EnumToString(InpATRTimeframe), InpATRMult, InpRR)
                   : StringFormat("SL %.*f | TP %.*f (price distance)", _Digits, InpSL, _Digits, InpTP);
    PrintFormat("Rules: risk %.2f%% | %s | entries %s-%s server | daily loss stop %.1f%% | max positions %d",
-               InpRiskPct, stops, InpEntryStart, InpDayEnd, InpMaxDailyLossPct, InpMaxPositions);
+               InpRiskPct, stops, InpEntryStart, InpEntryEnd, InpMaxDailyLossPct, InpMaxPositions);
    PrintFormat("Breakeven: %s", InpUseBreakeven ? StringFormat("at %.*f profit, SL to entry + %.*f", _Digits, InpBE_Trigger, _Digits, InpBE_Lock) : "off");
    PrintFormat("Entry: %s%s | trailing: %s", InpEntryMode == ENTRY_STOP ? "stop orders at PDH / PDL" : "candle close beyond the level, ",
                InpEntryMode == ENTRY_STOP ? "" : EnumToString(InpConfirmTF),
@@ -841,8 +849,15 @@ void OnTick()
    // OCO safety net (e.g. a delete that failed, or a restart right after a fill)
    if(g_enteredToday && (FindPending(true) > 0 || FindPending(false) > 0)) DeletePendings("one-cancels-other");
 
+   // entry window over: unfilled orders go, open trades keep running until SL / TP / day end
+   if(mins >= g_entryEndMin)
+     {
+      if(FindPending(true) > 0 || FindPending(false) > 0) DeletePendings("entry window ended");
+      if(!g_dayClosed) { g_dayClosed = true; g_status = "entry window ended"; }
+     }
+
    PrepareLevels();
-   if(mins >= g_startMin) ManageEntries();
+   if(mins >= g_startMin && mins < g_entryEndMin) ManageEntries();
    UpdateComment();
   }
 
