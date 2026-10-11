@@ -37,7 +37,7 @@
 //|  a server day that ends at 17:00 New York (UTC+2 / UTC+3).        |
 //+------------------------------------------------------------------+
 #property copyright "PDH PDL Breakout"
-#property version   "2.30"
+#property version   "2.31"
 #property description "Previous-day high/low breakout with fixed SL/TP. Research and limits: reports/PDH_PDL_Research.md"
 
 #include <Trade\Trade.mqh>
@@ -722,7 +722,7 @@ int OnInit()
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
    g_day = 0;
 
-   PrintFormat("PDH_PDL_Breakout 2.30 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
+   PrintFormat("PDH_PDL_Breakout 2.31 on %s | digits %d, tick size %g, tick value %g %s, contract %g, lots %g-%g step %g | stops level %I64d, freeze %I64d points",
                _Symbol, _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
                AccountInfoString(ACCOUNT_CURRENCY), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
@@ -826,4 +826,26 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       g_status = "trade closed - done for today";
      }
   }
+//+------------------------------------------------------------------+
+//|  Optimisation                                                     |
+//+------------------------------------------------------------------+
+// SL and TP: start 10, step 10 whatever the Inputs table shows (SL up to 200, TP up to 400).
+// Only the boxes you tick are optimised; the other inputs keep their value.
+void Range(const string name, const double start, const double step, const double stop)
+  {
+   bool on = false;
+   double v = 0, a = 0, b = 0, c = 0;
+   if(ParameterGetRange(name, on, v, a, b, c) && !ParameterSetRange(name, on, v, start, step, stop))
+      PrintFormat("Could not set the range of %s", name);
+  }
+
+int OnTesterInit()
+  {
+   Range("InpSL", 10.0, 10.0, 200.0);
+   Range("InpTP", 10.0, 10.0, 400.0);
+   Print("Optimisation ranges: SL 10-200 and TP 10-400, step 10");
+   return INIT_SUCCEEDED;
+  }
+
+void OnTesterDeinit() { }
 //+------------------------------------------------------------------+

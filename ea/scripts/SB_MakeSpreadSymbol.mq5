@@ -3,23 +3,27 @@
 //|                                                                  |
 //|  Script: makes a CUSTOM SYMBOL that is an exact copy of the chart |
 //|  symbol (same bid prices, same times, same contract settings)     |
-//|  but with the SPREAD you choose - e.g. your prop firm's 20-30     |
-//|  points instead of the broker's 50+. Backtest the EA on the new   |
-//|  symbol with "Every tick based on real ticks".                    |
+//|  but with the SPREAD you choose - e.g. your prop firm's lower     |
+//|  spread instead of the broker's history. Backtest the EA on the   |
+//|  new symbol with "Every tick based on real ticks".                |
+//|                                                                  |
+//|  Spread is typed as a PRICE distance, like the chart:             |
+//|   NDX100 / NAS100 1.0 = 1 index point, XAUUSD 0.20 = 20 cents,    |
+//|   EURUSD 0.0001 = 1 pip.                                          |
 //|                                                                  |
 //|  Spread modes:                                                    |
-//|   FIXED : every tick ask = bid + SpreadMin                        |
+//|   FIXED : every tick ask = bid + SpreadMin (default)              |
 //|   CLIP  : keep the real spread but limit it to SpreadMin..Max     |
 //|           (keeps news widening, removes the broker's extra cost)  |
 //|   RANDOM: random spread between SpreadMin and SpreadMax per tick  |
 //|                                                                  |
-//|  Use: open a chart of the source symbol (e.g. XAUUSD.T), drag     |
+//|  Use: open a chart of the source symbol (e.g. NDX100.m), drag     |
 //|  this script on it, set the dates and spread, OK. It copies one   |
 //|  day at a time (progress in the chart corner). The new symbol is  |
-//|  added to Market Watch, e.g. XAUUSD.T_S25.                        |
+//|  added to Market Watch, e.g. NDX100.m_S100 (name = broker points).|
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Simple Breakout - spread copy"
-#property version   "1.11"
+#property version   "1.20"
 #property script_show_inputs
 
 enum ENUM_SPREAD_MODE
@@ -31,9 +35,9 @@ enum ENUM_SPREAD_MODE
 
 input datetime         InpFrom      = D'2022.04.01';   // Copy from (server date)
 input datetime         InpTo        = D'2026.10.02';   // Copy to (server date)
-input ENUM_SPREAD_MODE InpMode      = SPM_CLIP;        // Spread mode
-input int              InpSpreadMin = 20;              // Spread min / fixed (points)
-input int              InpSpreadMax = 30;              // Spread max (points)
+input ENUM_SPREAD_MODE InpMode      = SPM_FIXED;       // Spread mode
+input double           InpSpreadMin = 1.0;             // Spread min / fixed, price distance (NDX100 1.0 = 1 point)
+input double           InpSpreadMax = 2.0;             // Spread max, price distance (CLIP / RANDOM only)
 input string           InpSuffix    = "";              // New symbol suffix ("" = _S<min>-<max> / _S<min>)
 input bool             InpResume    = true;            // Symbol already exists: continue from its last copied day
 
@@ -46,9 +50,14 @@ void OnStart()
       return;
      }
    double pt  = SymbolInfoDouble(src, SYMBOL_POINT);
-   if(InpSpreadMin < 0 || InpSpreadMax < InpSpreadMin) { Alert("Spread: need 0 <= min <= max"); return; }
+   if(pt <= 0.0) { Alert("Symbol point size unknown"); return; }
+   if(InpSpreadMin < 0 || (InpMode != SPM_FIXED && InpSpreadMax < InpSpreadMin)) { Alert("Spread: need 0 <= min <= max"); return; }
+   // price distance -> broker points (NDX100.m with 2 digits: 1.0 -> 100 points)
+   int smin = (int)MathRound(InpSpreadMin / pt);
+   int smax = (InpMode == SPM_FIXED) ? smin : (int)MathRound(InpSpreadMax / pt);
+   PrintFormat("Spread %.*f - %.*f = %d - %d points of %s (point %g)", _Digits, InpSpreadMin, _Digits, InpSpreadMax, smin, smax, src, pt);
    string suffix = InpSuffix != "" ? InpSuffix :
-                   (InpMode == SPM_FIXED ? StringFormat("_S%d", InpSpreadMin) : StringFormat("_S%d-%d", InpSpreadMin, InpSpreadMax));
+                   (InpMode == SPM_FIXED ? StringFormat("_S%d", smin) : StringFormat("_S%d-%d", smin, smax));
    string dst = src + suffix;
 
    // 1) create the custom symbol as a copy of the source (contract size, digits, sessions, margin...)
@@ -60,9 +69,9 @@ void OnStart()
      { Alert("CustomSymbolCreate failed, error ", GetLastError()); return; }
    CustomSymbolSetInteger(dst, SYMBOL_SPREAD_FLOAT, true);
    CustomSymbolSetString(dst, SYMBOL_DESCRIPTION,
-                         StringFormat("%s copy, spread %s %d-%d pts", src, EnumToString(InpMode), InpSpreadMin, InpSpreadMax));
+                         StringFormat("%s copy, spread %s %d-%d pts", src, EnumToString(InpMode), smin, smax));
    PrintFormat("Copying %s -> %s  %s .. %s  spread %s %d..%d points", src, dst, TimeToString(InpFrom, TIME_DATE),
-               TimeToString(InpTo, TIME_DATE), EnumToString(InpMode), InpSpreadMin, InpSpreadMax);
+               TimeToString(InpTo, TIME_DATE), EnumToString(InpMode), smin, smax);
 
    MathSrand((int)GetTickCount());
    long   totalTicks = 0;
@@ -87,9 +96,9 @@ void OnStart()
       int nr = CopyRates(src, PERIOD_M1, day, day + 86399, rates);
       if(nr > 0)
         {
-         int barSpread = (InpMode == SPM_FIXED) ? InpSpreadMin : (InpSpreadMin + InpSpreadMax) / 2;
+         int barSpread = (InpMode == SPM_FIXED) ? smin : (smin + smax) / 2;
          for(int i = 0; i < nr; i++)
-            rates[i].spread = (InpMode == SPM_CLIP) ? (int)MathMax(InpSpreadMin, MathMin(InpSpreadMax, rates[i].spread)) : barSpread;
+            rates[i].spread = (InpMode == SPM_CLIP) ? (int)MathMax(smin, MathMin(smax, rates[i].spread)) : barSpread;
          CustomRatesReplace(dst, day, day + 86399, rates);
         }
 
@@ -108,11 +117,11 @@ void OnStart()
       for(int i = 0; i < nt; i++)
         {
          if(ticks[i].bid <= 0) continue;
-         int orig = (ticks[i].ask > 0) ? (int)MathRound((ticks[i].ask - ticks[i].bid) / pt) : InpSpreadMin;
+         int orig = (ticks[i].ask > 0) ? (int)MathRound((ticks[i].ask - ticks[i].bid) / pt) : smin;
          int sp;
-         if(InpMode == SPM_FIXED)      sp = InpSpreadMin;
-         else if(InpMode == SPM_CLIP)  sp = (int)MathMax(InpSpreadMin, MathMin(InpSpreadMax, orig));
-         else                          sp = InpSpreadMin + (int)MathRound((InpSpreadMax - InpSpreadMin) * MathRand() / 32767.0);
+         if(InpMode == SPM_FIXED)      sp = smin;
+         else if(InpMode == SPM_CLIP)  sp = (int)MathMax(smin, MathMin(smax, orig));
+         else                          sp = smin + (int)MathRound((smax - smin) * MathRand() / 32767.0);
          ticks[kept]       = ticks[i];
          ticks[kept].ask   = NormalizeDouble(ticks[i].bid + sp * pt, _Digits);
          ticks[kept].flags = TICK_FLAG_BID | TICK_FLAG_ASK;
