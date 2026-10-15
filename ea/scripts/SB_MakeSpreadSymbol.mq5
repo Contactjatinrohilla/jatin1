@@ -19,7 +19,7 @@
 //|  added to Market Watch, e.g. XAUUSD.T_S25.                        |
 //+------------------------------------------------------------------+
 #property copyright "XAUUSD Simple Breakout - spread copy"
-#property version   "1.11"
+#property version   "1.12"
 #property script_show_inputs
 
 enum ENUM_SPREAD_MODE
@@ -61,6 +61,8 @@ void OnStart()
    CustomSymbolSetInteger(dst, SYMBOL_SPREAD_FLOAT, true);
    CustomSymbolSetString(dst, SYMBOL_DESCRIPTION,
                          StringFormat("%s copy, spread %s %d-%d pts", src, EnumToString(InpMode), InpSpreadMin, InpSpreadMax));
+   PrintFormat("Spread %d - %d points of %s = %s - %s in price (point %s)", InpSpreadMin, InpSpreadMax, src,
+               DoubleToString(InpSpreadMin * pt, _Digits), DoubleToString(InpSpreadMax * pt, _Digits), DoubleToString(pt, _Digits));
    PrintFormat("Copying %s -> %s  %s .. %s  spread %s %d..%d points", src, dst, TimeToString(InpFrom, TIME_DATE),
                TimeToString(InpTo, TIME_DATE), EnumToString(InpMode), InpSpreadMin, InpSpreadMax);
 
@@ -68,6 +70,7 @@ void OnStart()
    long   totalTicks = 0;
    double sprSum = 0;
    int    daysDone = 0, daysEmpty = 0;
+   datetime failedDay = 0;
    datetime start = (datetime)((long)InpFrom - (long)InpFrom % 86400);
    if(exists && InpResume)
      {
@@ -96,14 +99,24 @@ void OnStart()
       // 3) ticks of the day: same bid, new ask
       MqlTick ticks[];
       ulong from_msc = (ulong)day * 1000, to_msc = (ulong)(day + 86400) * 1000 - 1;
-      int nt = -1;
-      for(int tries = 0; tries < 5 && nt < 0; tries++)
+      // big custom-symbol histories (Tickstory, Dukascopy) can need many seconds to load one day:
+      // keep asking for up to ~60 s instead of skipping the day and leaving a hole in the copy
+      int nt = -1, err = 0;
+      for(int tries = 0; tries < 60 && nt < 0 && !IsStopped(); tries++)
         {
+         ResetLastError();
          nt = CopyTicksRange(src, ticks, COPY_TICKS_ALL, from_msc, to_msc);
-         if(nt < 0) Sleep(500);
+         if(nt < 0) { err = GetLastError(); Sleep(1000); }
         }
-      if(nt < 0) PrintFormat("%s: no ticks from %s (error %d)", TimeToString(day, TIME_DATE), src, GetLastError());
-      if(nt <= 0) { daysEmpty++; continue; }
+      if(nt < 0)
+        {
+         if(IsStopped()) break;
+         failedDay = day;
+         PrintFormat("%s: ticks of %s could not be loaded in 60 s (error %d) - stopping so this day is not skipped",
+                     TimeToString(day, TIME_DATE), src, err);
+         break;
+        }
+      if(nt == 0) { daysEmpty++; continue; }
       int kept = 0;
       for(int i = 0; i < nt; i++)
         {
@@ -131,9 +144,16 @@ void OnStart()
      }
    Comment("");
    SymbolSelect(dst, true);
+   if(failedDay > 0)
+     {
+      Alert(StringFormat("PAUSED at %s: MT5 did not deliver the ticks of %s in time. Run the script again with Resume = true - "
+                         "it retries this day (the data is usually loaded by then).", TimeToString(failedDay, TIME_DATE), src));
+      return;
+     }
    if(IsStopped())
      {
-      Alert("STOPPED before the end - run the script again with Resume = true to continue from where it stopped.");
+      Alert("STOPPED before the end (the chart was closed / changed, or another script was dropped on it) - "
+            "run the script again ONCE with Resume = true to continue from where it stopped.");
       return;
      }
    string msg = StringFormat("DONE: %s created from %s | %d days, %I64d ticks | average spread %.1f points | %d days without ticks "
