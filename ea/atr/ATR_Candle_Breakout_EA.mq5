@@ -22,7 +22,7 @@
 //|  breakeven. Lot size from % risk of balance (or fixed lots).      |
 //+------------------------------------------------------------------+
 #property copyright "ATR Candle Breakout"
-#property version   "1.00"
+#property version   "1.01"
 #property description "Trades breakouts of candles whose range exceeds ATR x multiplier."
 
 #include <Trade\Trade.mqh>
@@ -64,6 +64,8 @@ input double          InpFixedLots   = 0.10;               // Fixed lots when ri
 input int             InpMaxPositions= 1;                  // Max open positions of this EA (0 = no limit)
 input string          InpWindow      = "00:00-23:59";      // Trading window, server time HH:MM-HH:MM
 input ulong           InpMagic       = 240501;             // Magic number
+
+#define MARGIN_USE 0.90   // use at most 90% of free margin for one trade
 
 CTrade   trade;
 int      g_atr = INVALID_HANDLE;
@@ -116,7 +118,8 @@ double StopLevelDist()
    return (double)lvl * _Point;
   }
 
-double LotsForRisk(const double slDist)
+//--- lots for the risk %, then cut down to what free margin can hold (skip = 0)
+double LotsForRisk(const double slDist, const bool isBuy, const double price)
   {
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -139,6 +142,22 @@ double LotsForRisk(const double slDist)
       lots = minLot;
    if(lots > maxLot)
       lots = maxLot;
+
+   double marginLot = 0.0;
+   ENUM_ORDER_TYPE type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(OrderCalcMargin(type, _Symbol, 1.0, price, marginLot) && marginLot > 0.0)
+     {
+      double canHold = AccountInfoDouble(ACCOUNT_MARGIN_FREE) * MARGIN_USE / marginLot;
+      if(lots > canHold)
+        {
+         lots = MathFloor(canHold / step) * step;
+         if(lots < minLot)
+           {
+            Print("Skipped: free margin too small even for the minimum lot");
+            return 0.0;
+           }
+        }
+     }
    return NormalizeDouble(lots, 8);
   }
 
@@ -203,7 +222,7 @@ void PlaceStopOrders(const double hi, const double lo, const double atr)
         {
          double sl = Norm(buyPx - slDist);
          double tp = (InpRR > 0.0) ? Norm(buyPx + slDist * InpRR) : 0.0;
-         double lots = LotsForRisk(slDist);
+         double lots = LotsForRisk(slDist, true, buyPx);
          if(lots > 0.0)
             trade.BuyStop(lots, buyPx, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, exp, "ATR breakout buy");
         }
@@ -218,7 +237,7 @@ void PlaceStopOrders(const double hi, const double lo, const double atr)
         {
          double sl = Norm(sellPx + slDist);
          double tp = (InpRR > 0.0) ? Norm(sellPx - slDist * InpRR) : 0.0;
-         double lots = LotsForRisk(slDist);
+         double lots = LotsForRisk(slDist, false, sellPx);
          if(lots > 0.0)
             trade.SellStop(lots, sellPx, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, exp, "ATR breakout sell");
         }
@@ -231,7 +250,7 @@ void PlaceMarket(const bool isBuy, const double hi, const double lo, const doubl
    double slDist = (InpSLMode == SL_ATR) ? atr * InpSLMult : (isBuy ? px - lo : hi - px);
    if(slDist <= StopLevelDist())
       return;
-   double lots = LotsForRisk(slDist);
+   double lots = LotsForRisk(slDist, isBuy, px);
    if(lots <= 0.0)
       return;
    if(isBuy)
