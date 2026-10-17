@@ -12,9 +12,10 @@
 //|  3. Enters at market. SL / TP = ATR x multiplier (ATR timeframe  |
 //|     is an input, M5 by default - M1 ATR is too noisy).           |
 //|     Optional breakeven (with a small locked profit), trailing    |
-//|     stop (ATR or R distance) and a daily time exit. 1 R is always |
-//|     the trade's INITIAL SL distance, read from the opening order, |
-//|     so it survives SL moves and EA restarts.                     |
+//|     stop (ATR or R distance), partial close at x R and a daily   |
+//|     time exit. 1 R is always the trade's INITIAL SL distance,    |
+//|     read from the opening order, so it survives SL moves, the    |
+//|     partial close and EA restarts.                               |
 //|  4. Watches account equity on every tick. If the account loses   |
 //|     2.5% today or 8.5% this week, it closes all this EA's trades |
 //|     and stops trading until the next day / week. This is shared |
@@ -23,7 +24,7 @@
 //|     the EA's other trades still fits inside the limit.           |
 //|  5. Lot size is cut to what free margin can hold.                |
 //+------------------------------------------------------------------+
-#property version   "2.11"
+#property version   "2.20"
 #property description "PDH/PDL breakout, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
@@ -63,6 +64,9 @@ input double TrailDistATR     = 1.0;    // ... distance = ATR x this (ATR mode)
 input double TrailDistR       = 1.0;    // ... distance = this many R (R mode)
 input int    TrailStepPoints  = 10;     // ... move the SL only when it improves by at least this (points)
 input bool   TrailRemoveTP    = false;  // ... remove the TP once trailing starts (let winners run)
+input bool   UsePartialClose  = false;  // Close part of the trade once in profit
+input double PartialAtR       = 1.0;    // ... at this many R
+input double PartialPct       = 50.0;   // ... this % of the ORIGINAL lots (rounded down to the lot step)
 input bool   UseTimeExit      = false;  // Close trades + stop entries at the time below (no overnight / weekend holds)
 input int    ExitHour         = 22;     // Exit hour (server time)
 input int    ExitMinute       = 45;     // Exit minute
@@ -98,6 +102,7 @@ datetime lastCloseFail = 0;    // throttles close retries / log lines
 string   gvPrefix;             // shared-variable prefix for this account
 ulong    riskTicket[];         // cache: position id -> initial SL distance (1 R)
 double   riskDist[];
+double   riskVol[];            // cache: initial lots of the position
 datetime lastManageLog = 0;    // throttles SL-move log lines
 
 //+------------------------------------------------------------------+
@@ -117,6 +122,8 @@ int OnInit()
      { Print("BreakevenAtR must be above 0."); return INIT_PARAMETERS_INCORRECT; }
    if(UseBreakeven && (BreakevenLockR < 0 || BreakevenLockR >= BreakevenAtR))
      { Print("BreakevenLockR must be 0 or more and below BreakevenAtR."); return INIT_PARAMETERS_INCORRECT; }
+   if(UsePartialClose && (PartialAtR <= 0 || PartialPct <= 0 || PartialPct >= 100))
+     { Print("Partial close: PartialAtR must be above 0 and PartialPct between 0 and 100."); return INIT_PARAMETERS_INCORRECT; }
    if(UseTrailing && (TrailStartR <= 0 || TrailStepPoints < 0 ||
                       (TrailMode == TRAIL_ATR && TrailDistATR <= 0) || (TrailMode == TRAIL_R && TrailDistR <= 0)))
      { Print("Invalid trailing settings."); return INIT_PARAMETERS_INCORRECT; }
@@ -159,7 +166,7 @@ void OnTick()
       return;
      }
 
-   //--- 2) Time exit, breakeven and trailing: every tick
+   //--- 2) Time exit, partial close, breakeven and trailing: every tick
    if(UseTimeExit && PastExitTime())
       ClosePositions(false);                   // this chart's symbol
    else
@@ -296,13 +303,15 @@ bool PastExitTime()
   }
 
 // 1 R of a position = its INITIAL SL distance, taken from the order that opened it
-// (the current SL may already have been moved). Cached per position; 0 = unknown.
-double InitialRisk(const ulong posId, const double open)
+// (the current SL may already have been moved). Also returns the position's initial lots
+// (a partial close reduces the volume). Cached per position; 0 = unknown.
+double InitialRisk(const ulong posId, const double open, double &initVol)
   {
    for(int i = ArraySize(riskTicket) - 1; i >= 0; i--)
-      if(riskTicket[i] == posId) return riskDist[i];
+      if(riskTicket[i] == posId) { initVol = riskVol[i]; return riskDist[i]; }
 
    double dist = 0;
+   initVol = 0;
    if(HistorySelectByPosition(posId))
      {
       datetime first = 0;
@@ -312,18 +321,47 @@ double InitialRisk(const ulong posId, const double open)
          if(o == 0) continue;
          datetime t  = (datetime)HistoryOrderGetInteger(o, ORDER_TIME_SETUP);
          double   sl = HistoryOrderGetDouble(o, ORDER_SL);
-         if(sl > 0 && (first == 0 || t < first)) { first = t; dist = MathAbs(open - sl); }
+         if(sl > 0 && (first == 0 || t < first))
+           { first = t; dist = MathAbs(open - sl); initVol = HistoryOrderGetDouble(o, ORDER_VOLUME_INITIAL); }
         }
      }
-   if(dist <= 0) return 0;                                      // not found: do not cache, try again later
+   if(dist <= 0 || initVol <= 0) return 0;                      // not found: do not cache, try again later
 
-   if(ArraySize(riskTicket) > 200) { ArrayResize(riskTicket, 0); ArrayResize(riskDist, 0); }
+   if(ArraySize(riskTicket) > 200) { ArrayResize(riskTicket, 0); ArrayResize(riskDist, 0); ArrayResize(riskVol, 0); }
    int n = ArraySize(riskTicket);
    ArrayResize(riskTicket, n + 1);
    ArrayResize(riskDist, n + 1);
+   ArrayResize(riskVol, n + 1);
    riskTicket[n] = posId;
    riskDist[n]   = dist;
+   riskVol[n]    = initVol;
    return dist;
+  }
+
+// Closes PartialPct of the ORIGINAL lots, once. Skipped (logged) when the piece or the rest
+// would be below the broker's minimum lot.
+void PartialClose(const ulong ticket, const double initVol, const double curVol)
+  {
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0 || minLot <= 0) return;
+   if(curVol < initVol - step * 0.5) return;                   // already partly closed
+
+   double part = MathFloor(initVol * PartialPct / 100.0 / step + 1e-9) * step;
+   int    dg   = (int)MathMax(0, MathCeil(-MathLog10(step)));
+   part = NormalizeDouble(part, dg);
+   if(part < minLot || curVol - part < minLot - 1e-9)
+     {
+      ManageLog(StringFormat("#%I64u: partial close skipped - %s lots cannot be split %.0f%% with min lot %s",
+                             ticket, DoubleToString(curVol, dg), PartialPct, DoubleToString(minLot, dg)));
+      return;
+     }
+   if(trade.PositionClosePartial(ticket, part))
+      Print("Partial close #", ticket, ": ", DoubleToString(part, dg), " of ", DoubleToString(initVol, dg),
+            " lots at ", DoubleToString(PartialAtR, 2), " R");
+   else
+      ManageLog(StringFormat("#%I64u: partial close failed, retcode %u (%s)", ticket, trade.ResultRetcode(),
+                             trade.ResultRetcodeDescription()));
   }
 
 void ManageLog(const string msg)
@@ -336,7 +374,7 @@ void ManageLog(const string msg)
 // Breakeven and trailing for this chart's positions. The SL only ever moves in the trade's favour.
 void ManagePositions()
   {
-   if(!UseBreakeven && !UseTrailing) return;
+   if(!UseBreakeven && !UseTrailing && !UsePartialClose) return;
    double stopsLvl  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double freezeLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
    double step      = MathMax(TrailStepPoints, 1) * _Point;
@@ -361,12 +399,18 @@ void ManagePositions()
       double tp    = PositionGetDouble(POSITION_TP);
       if(sl <= 0) continue;
 
-      double R = InitialRisk((ulong)PositionGetInteger(POSITION_IDENTIFIER), open);
-      if(R <= 0) { ManageLog(StringFormat("#%I64u: initial SL not found in history - breakeven/trailing skipped", ticket)); continue; }
+      double initVol = 0;
+      double R = InitialRisk((ulong)PositionGetInteger(POSITION_IDENTIFIER), open, initVol);
+      if(R <= 0) { ManageLog(StringFormat("#%I64u: initial SL not found in history - trade management skipped", ticket)); continue; }
 
       double px     = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double profit = isBuy ? px - open : open - px;
       double dir    = isBuy ? 1.0 : -1.0;
+
+      //--- partial close: once per position (done = volume already below the initial lots)
+      if(UsePartialClose && profit >= R * PartialAtR)
+         PartialClose(ticket, initVol, PositionGetDouble(POSITION_VOLUME));
+      if(!UseBreakeven && !UseTrailing) continue;
 
       //--- candidate stops (in price); the best one for the trade wins
       double newSl  = sl;

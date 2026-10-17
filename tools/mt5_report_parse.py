@@ -53,16 +53,31 @@ def parse(path, sheet=None):
         elif sec == "Deals" and r[3] == "balance":
             info["Deposit deal"] = _num(r[10])
 
-    # pair: an OUT deal closes the open IN deal of the opposite type (one leg per side)
+    # pair: OUT deals close the oldest open IN deal of the opposite type. A partial close is an OUT deal
+    # smaller than what is still open; the trade is complete when its whole volume is closed. The merged
+    # exit has the summed profit/commission/swap, the volume-weighted exit price, the LAST deal's time and
+    # comment, and `parts` = number of closing deals.
     deals.sort(key=lambda d: (d["time"], 0 if d["dir"] == "in" else 1, d["deal"]))
-    open_by_type, trades = {}, []
+    open_by_type, pieces, trades = {}, {}, []
     for d in deals:
         if d["dir"] == "in":
+            d["left"] = d["vol"]
             open_by_type.setdefault(d["type"], []).append(d)
         else:
             want = "buy" if d["type"] == "sell" else "sell"
-            ent = open_by_type[want].pop(0)
+            ent = open_by_type[want][0]
+            pieces.setdefault(ent["deal"], []).append(d)
+            ent["left"] = round(ent["left"] - d["vol"], 8)
+            if ent["left"] > 1e-9:
+                continue
+            open_by_type[want].pop(0)
+            ps = pieces.pop(ent["deal"])
+            vol = sum(x["vol"] for x in ps) or 1
+            x = dict(ps[-1], vol=ent["vol"], parts=len(ps),
+                     price=sum(x["price"] * x["vol"] for x in ps) / vol,
+                     profit=sum(x["profit"] for x in ps), comm=sum(x["comm"] for x in ps),
+                     swap=sum(x["swap"] for x in ps))
             o = orders.get(ent["order"], {})
-            trades.append(dict(entry=ent, exit=d, order=o))
+            trades.append(dict(entry=ent, exit=x, order=o))
     trades.sort(key=lambda t: (t["entry"]["time"], t["entry"]["deal"]))
     return info, inputs, results, trades
