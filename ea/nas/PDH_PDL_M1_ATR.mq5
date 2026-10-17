@@ -23,7 +23,7 @@
 //|     the EA's other trades still fits inside the limit.           |
 //|  5. Lot size is cut to what free margin can hold.                |
 //+------------------------------------------------------------------+
-#property version   "2.10"
+#property version   "2.11"
 #property description "PDH/PDL breakout, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
@@ -50,6 +50,7 @@ input ENUM_TIMEFRAMES ATR_Timeframe = PERIOD_M5; // ATR timeframe (v1 used M1)
 input int    ATR_Period       = 14;     // ATR period (v1 used 5)
 input double ATR_SL_Mult      = 2.0;    // SL distance = ATR x this
 input double ATR_TP_Mult      = 4.0;    // TP distance = ATR x this
+input double MinSLDistance    = 0;      // Skip the trade if the ATR stop is smaller than this, in PRICE (8 = 8 index points; 0 = off)
 
 input group "=== Trade Management ==="
 input bool   UseBreakeven     = false;  // Move SL to entry once in profit
@@ -102,7 +103,7 @@ datetime lastManageLog = 0;    // throttles SL-move log lines
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(ATR_Period < 1 || ATR_SL_Mult <= 0 || ATR_TP_Mult <= 0)
+   if(ATR_Period < 1 || ATR_SL_Mult <= 0 || ATR_TP_Mult <= 0 || MinSLDistance < 0)
      { Print("Invalid ATR settings."); return INIT_PARAMETERS_INCORRECT; }
    if(DailyLossPct <= 0 || WeeklyLossPct <= 0)
      { Print("Loss limits must be above 0."); return INIT_PARAMETERS_INCORRECT; }
@@ -586,6 +587,14 @@ bool OpenTrade(const bool isBuy, const double atr)
   {
    double slDist = atr * ATR_SL_Mult;
    double tpDist = atr * ATR_TP_Mult;
+
+   // Tiny stops: the spread eats most of the edge (1 point of spread on a 5-point stop = 0.2 R per trade)
+   if(MinSLDistance > 0 && slDist < MinSLDistance)
+     {
+      Print(isBuy ? "PDH buy" : "PDL sell", " signal skipped: ATR stop ", DoubleToString(slDist, _Digits),
+            " is below MinSLDistance ", DoubleToString(MinSLDistance, _Digits));
+      return false;
+     }
 
    // Respect the broker's minimum stop distance (plus spread as a cushion)
    double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)
