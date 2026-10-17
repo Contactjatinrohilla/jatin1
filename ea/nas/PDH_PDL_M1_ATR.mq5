@@ -23,8 +23,10 @@
 //|     a new trade is only opened if it plus the open risk of all   |
 //|     the EA's other trades still fits inside the limit.           |
 //|  5. Lot size is cut to what free margin can hold.                |
+//|  6. Chart: PDH/PDL lines, entry / SL / TP lines with price,      |
+//|     points, money and R, live P/L next to price, info panel.     |
 //+------------------------------------------------------------------+
-#property version   "2.20"
+#property version   "2.30"
 #property description "PDH/PDL breakout, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
@@ -92,6 +94,17 @@ input group "=== Execution ==="
 input long   MagicNumber      = 260514; // Magic number (use the same on all charts)
 input int    SlippagePoints   = 30;     // Max slippage (points)
 
+input group "=== Chart Display ==="
+input bool   ShowChart        = true;   // Draw levels, trade lines, numbers and the info panel
+input bool   ShowPanel        = true;   // ... info panel (top-left)
+input int    FontSize         = 9;      // ... text size
+input color  ColPDH           = clrDodgerBlue;   // ... PDH line
+input color  ColPDL           = clrOrange;       // ... PDL line
+input color  ColEntry         = clrSilver;       // ... entry line
+input color  ColSL            = clrRed;          // ... stop loss line
+input color  ColTP            = clrLimeGreen;    // ... take profit line
+input color  ColPanel         = clrWhite;        // ... panel text
+
 //--- Globals --------------------------------------------------------
 CTrade   trade;
 int      atrHandle   = INVALID_HANDLE;
@@ -104,6 +117,10 @@ ulong    riskTicket[];         // cache: position id -> initial SL distance (1 R
 double   riskDist[];
 double   riskVol[];            // cache: initial lots of the position
 datetime lastManageLog = 0;    // throttles SL-move log lines
+bool     pdhBrokenToday = false; // for the chart display (set by the signal check)
+bool     pdlBrokenToday = false;
+datetime lastDraw    = 0;      // chart redraw at most once per server second
+const string OBJ     = "PDHPDL_V_"; // prefix of every chart object this EA draws
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -153,11 +170,18 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
+   ObjectsDeleteAll(0, OBJ);
    Comment("");
   }
 
 //+------------------------------------------------------------------+
 void OnTick()
+  {
+   TickLogic();
+   UpdateChart();
+  }
+
+void TickLogic()
   {
    //--- 1) Loss protection: every tick (cheap)
    if(!RiskCheck())
@@ -271,7 +295,7 @@ void LogHalt()
    if(haltLogged) return;
    haltLogged = true;
    Print("Loss limit reached. All EA trades closed. No new trades until the limit resets.");
-   Comment("PDH/PDL EA: LOSS LIMIT HIT - trading stopped");
+   if(!ShowChart) Comment("PDH/PDL EA: LOSS LIMIT HIT - trading stopped");   // with ShowChart the panel shows it
   }
 
 // Closes this EA's positions: every symbol (loss cap) or only this chart's (time exit).
@@ -496,11 +520,14 @@ void CheckForEntry()
      }
    bool pdhUsed = prevMax > pdh;               // an earlier close already broke PDH today
    bool pdlUsed = prevMin < pdl;
+   pdhBrokenToday = pdhUsed || c1 > pdh;
+   pdlBrokenToday = pdlUsed || c1 < pdl;
 
-   Comment(StringFormat("PDH: %s %s   PDL: %s %s   Loss room: %s",
-           DoubleToString(pdh, _Digits), (pdhUsed || c1 > pdh) ? "(broken today)" : "",
-           DoubleToString(pdl, _Digits), (pdlUsed || c1 < pdl) ? "(broken today)" : "",
-           DoubleToString(riskRoom, 2)));
+   if(!ShowChart)
+      Comment(StringFormat("PDH: %s %s   PDL: %s %s   Loss room: %s",
+              DoubleToString(pdh, _Digits), pdhBrokenToday ? "(broken today)" : "",
+              DoubleToString(pdl, _Digits), pdlBrokenToday ? "(broken today)" : "",
+              DoubleToString(riskRoom, 2)));
 
    // First M1 close beyond the level today
    bool buySignal  = TradeBuys  && !pdhUsed && c1 > pdh;
@@ -687,5 +714,205 @@ bool OpenTrade(const bool isBuy, const double atr)
          return false;
      }
    return false;
+  }
+//====================================================================
+//  CHART DISPLAY
+//====================================================================
+
+// Money for `lots` moving `dist` in price (positive number).
+double MoneyForDist(const double lots, const double dist)
+  {
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0 || tickValue <= 0) return 0;
+   return MathAbs(dist) / tickSize * tickValue * lots;
+  }
+
+string Money(const double v)
+  {
+   return (v < 0 ? "-" : "+") + DoubleToString(MathAbs(v), 2) + " " + AccountInfoString(ACCOUNT_CURRENCY);
+  }
+
+string Pts(const double d)
+  {
+   return (d < 0 ? "-" : "+") + DoubleToString(MathAbs(d), _Digits) + " pts";
+  }
+
+// Horizontal segment from t1 to t2 with a label at its right end.
+void DrawLevel(const string name, const datetime t1, const datetime t2, const double price, const color clr,
+               const ENUM_LINE_STYLE style, const int width, const string text)
+  {
+   string ln = OBJ + name, tx = OBJ + name + "_txt";
+   if(ObjectFind(0, ln) < 0) ObjectCreate(0, ln, OBJ_TREND, 0, t1, price, t2, price);
+   ObjectSetInteger(0, ln, OBJPROP_TIME, 0, t1);
+   ObjectSetDouble (0, ln, OBJPROP_PRICE, 0, price);
+   ObjectSetInteger(0, ln, OBJPROP_TIME, 1, t2);
+   ObjectSetDouble (0, ln, OBJPROP_PRICE, 1, price);
+   ObjectSetInteger(0, ln, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, ln, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, ln, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, ln, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, ln, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, ln, OBJPROP_BACK, true);
+   ObjectSetString (0, ln, OBJPROP_TOOLTIP, text);
+
+   if(ObjectFind(0, tx) < 0) ObjectCreate(0, tx, OBJ_TEXT, 0, t2, price);
+   ObjectSetInteger(0, tx, OBJPROP_TIME, 0, t2);
+   ObjectSetDouble (0, tx, OBJPROP_PRICE, 0, price);
+   ObjectSetString (0, tx, OBJPROP_TEXT, " " + text);
+   ObjectSetString (0, tx, OBJPROP_FONT, "Consolas");
+   ObjectSetInteger(0, tx, OBJPROP_FONTSIZE, FontSize);
+   ObjectSetInteger(0, tx, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, tx, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, tx, OBJPROP_SELECTABLE, false);
+  }
+
+void DeleteLevel(const string name)
+  {
+   ObjectDelete(0, OBJ + name);
+   ObjectDelete(0, OBJ + name + "_txt");
+  }
+
+void PanelLine(const int row, const string text, const color clr)
+  {
+   string nm = OBJ + "panel_" + IntegerToString(row);
+   if(ObjectFind(0, nm) < 0)
+     {
+      ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, nm, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+      ObjectSetString (0, nm, OBJPROP_FONT, "Consolas");
+     }
+   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, 20 + row * (FontSize + 7));
+   ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, FontSize);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, clr);
+   ObjectSetString (0, nm, OBJPROP_TEXT, text);
+  }
+
+void UpdateChart()
+  {
+   if(!ShowChart) return;
+   if(MQLInfoInteger(MQL_OPTIMIZATION)) return;
+   if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE)) return;  // nobody sees it: keep tests fast
+   datetime now = TimeCurrent();
+   if(now == lastDraw) return;
+   lastDraw = now;
+
+   datetime today = iTime(_Symbol, PERIOD_D1, 0);
+   datetime right = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds() * 3;   // labels a few bars right of price
+   if(today == 0) return;
+
+   //--- PDH / PDL for today
+   int shift = 1;
+   MqlDateTime d;
+   TimeToStruct(iTime(_Symbol, PERIOD_D1, 1), d);
+   if(d.day_of_week == 0) shift = 2;
+   double pdh = iHigh(_Symbol, PERIOD_D1, shift);
+   double pdl = iLow (_Symbol, PERIOD_D1, shift);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(pdh > 0 && pdl > 0)
+     {
+      DrawLevel("PDH", today, right, pdh, ColPDH, STYLE_SOLID, 2,
+                StringFormat("PDH %s  (%s from price)%s", DoubleToString(pdh, _Digits), Pts(pdh - bid),
+                             pdhBrokenToday ? "  BROKEN" : ""));
+      DrawLevel("PDL", today, right, pdl, ColPDL, STYLE_SOLID, 2,
+                StringFormat("PDL %s  (%s from price)%s", DoubleToString(pdl, _Digits), Pts(pdl - bid),
+                             pdlBrokenToday ? "  BROKEN" : ""));
+     }
+
+   //--- open position of this chart
+   bool   have = false;
+   string posText = "Position: none";
+   color  posClr  = ColPanel;
+   for(int i = PositionsTotal() - 1; i >= 0 && !have; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      have = true;
+
+      bool     isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      double   open  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double   sl    = PositionGetDouble(POSITION_SL);
+      double   tp    = PositionGetDouble(POSITION_TP);
+      double   lots  = PositionGetDouble(POSITION_VOLUME);
+      datetime t0    = (datetime)PositionGetInteger(POSITION_TIME);
+      double   px    = isBuy ? bid : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double   dir   = isBuy ? 1.0 : -1.0;
+      double   pl    = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      double   initVol = 0;
+      double   R     = InitialRisk((ulong)PositionGetInteger(POSITION_IDENTIFIER), open, initVol);
+
+      DrawLevel("ENTRY", t0, right, open, ColEntry, STYLE_DOT, 1,
+                StringFormat("%s %s lots @ %s", isBuy ? "BUY" : "SELL", DoubleToString(lots, 2),
+                             DoubleToString(open, _Digits)));
+      if(sl > 0)
+        {
+         double d_ = dir * (sl - open);                           // negative = loss side
+         DrawLevel("SL", t0, right, sl, ColSL, STYLE_DASH, 1,
+                   StringFormat("SL %s | %s | %s%s", DoubleToString(sl, _Digits), Pts(d_),
+                                Money((d_ < 0 ? -1 : 1) * MoneyForDist(lots, d_)),
+                                R > 0 ? StringFormat(" | %+.2fR", d_ / R) : ""));
+        }
+      else DeleteLevel("SL");
+      if(tp > 0)
+        {
+         double d_ = dir * (tp - open);
+         DrawLevel("TP", t0, right, tp, ColTP, STYLE_DASH, 1,
+                   StringFormat("TP %s | %s | %s%s", DoubleToString(tp, _Digits), Pts(d_),
+                                Money(MoneyForDist(lots, d_)), R > 0 ? StringFormat(" | %+.2fR", d_ / R) : ""));
+        }
+      else DeleteLevel("TP");
+
+      double moved = dir * (px - open);
+      string live  = StringFormat("P/L %s | %s%s", Money(pl), Pts(moved), R > 0 ? StringFormat(" | %+.2fR", moved / R) : "");
+      string nm = OBJ + "LIVE";
+      if(ObjectFind(0, nm) < 0) ObjectCreate(0, nm, OBJ_TEXT, 0, right, px);
+      ObjectSetInteger(0, nm, OBJPROP_TIME, 0, right);
+      ObjectSetDouble (0, nm, OBJPROP_PRICE, 0, px);
+      ObjectSetString (0, nm, OBJPROP_TEXT, " " + live);
+      ObjectSetString (0, nm, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, FontSize + 1);
+      ObjectSetInteger(0, nm, OBJPROP_COLOR, pl >= 0 ? ColTP : ColSL);
+      ObjectSetInteger(0, nm, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+
+      posText = StringFormat("Position: %s %s lots  %s", isBuy ? "BUY" : "SELL", DoubleToString(lots, 2), live);
+      posClr  = pl >= 0 ? ColTP : ColSL;
+     }
+   if(!have)
+     {
+      DeleteLevel("ENTRY"); DeleteLevel("SL"); DeleteLevel("TP");
+      ObjectDelete(0, OBJ + "LIVE");
+     }
+
+   //--- info panel
+   if(ShowPanel)
+     {
+      datetime dayStart = now - (now % 86400);
+      double   today_pl = RealizedSince(dayStart);
+      double   atr[];
+      string   atrTxt = "-";
+      if(CopyBuffer(atrHandle, 0, 1, 1, atr) == 1)
+         atrTxt = StringFormat("%s  (SL %s / TP %s)", DoubleToString(atr[0], _Digits),
+                               DoubleToString(atr[0] * ATR_SL_Mult, _Digits), DoubleToString(atr[0] * ATR_TP_Mult, _Digits));
+      int row = 0;
+      PanelLine(row++, StringFormat("PDH/PDL M1 ATR  |  %s  |  spread %d pts", _Symbol,
+                                    (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)), ColPanel);
+      PanelLine(row++, StringFormat("PDH %s %s   PDL %s %s", DoubleToString(pdh, _Digits), pdhBrokenToday ? "(broken)" : "",
+                                    DoubleToString(pdl, _Digits), pdlBrokenToday ? "(broken)" : ""), ColPanel);
+      PanelLine(row++, "ATR " + atrTxt, ColPanel);
+      PanelLine(row++, posText, posClr);
+      PanelLine(row++, StringFormat("Closed today %s  |  Equity %s", Money(today_pl),
+                                    DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2)), today_pl >= 0 ? ColPanel : ColSL);
+      PanelLine(row++, haltLogged ? "LOSS LIMIT HIT - trading stopped"
+                                  : StringFormat("Loss room %s  (daily %.1f%% / weekly %.1f%%)",
+                                                 DoubleToString(riskRoom, 2), DailyLossPct, WeeklyLossPct),
+                haltLogged ? ColSL : ColPanel);
+     }
+   else ObjectsDeleteAll(0, OBJ + "panel_");
+   ChartRedraw();
   }
 //+------------------------------------------------------------------+
