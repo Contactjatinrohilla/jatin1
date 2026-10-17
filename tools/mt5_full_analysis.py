@@ -69,7 +69,7 @@ def exit_reason(x, o, e):
     if c.startswith("tp"):
         return "Take profit"
     if not c.startswith("sl "):
-        return "Closed by EA"
+        return "Closed by EA (guard)"
     stop = float(c[3:])
     tol = max(0.011, abs(e["price"]) * 1e-6)
     if o.get("sl") and abs(stop - o["sl"]) <= tol:
@@ -181,7 +181,9 @@ def notes(rows, deposit, cv, daily_lim, dd_lim, inputs=()):
         out.append(f"6. Deepest closed-trade drawdown ${d['depth']:,.0f} ({100 * d['depth'] / d['peak']:.2f}% of the peak), "
                    f"from {d['start']:%Y-%m-%d} to the low on {d['trough']:%Y-%m-%d}"
                    + (f", recovered {d['recovered']:%Y-%m-%d}." if d["recovered"] else ", not recovered by the end.")
-                   + f" Prop limits used here: daily {daily_lim:.1%}, max {dd_lim:.0%} - far away.")
+                   + f" Max limit used here: {dd_lim:.0%} - "
+                   + ("far away." if d["depth"] / d["peak"] < dd_lim / 2 else
+                      "close to it." if d["depth"] / d["peak"] < dd_lim else "BREACHED."))
     side = defaultdict(float)
     for r in rows:
         side["BUY" if r["buy"] else "SELL"] += r["net"]
@@ -299,6 +301,10 @@ def build(src, dst, daily_lim=0.025, dd_lim=0.10):
     ws["B2"] = f"{info.get('Expert', '')} | {sym} | {info.get('Period', '')} | {results.get('History Quality', '')}"
     ws["B3"] = "Blue cells are inputs: change them and every sheet recalculates."
     ws["B3"].font = GREY
+    if "pips" in str(info.get("Currency", "")).lower():
+        ws["B4"] = ("WARNING: this test ran with 'Profit in pips' - every $ figure (MT5's and this workbook's) is in pip "
+                    "units, not account money. R multiples, win rate, profit factor and counts are still valid.")
+        ws["B4"].font = Font(name=FONT, bold=True, color="C00000")
     inp = [("Starting balance", deposit, USD, "From the report (Initial Deposit)."),
            ("$ per 1.00 point per 1.00 lot", cv, "0.00",
             f"Measured from the trades (profit / points / lots, median). {sym}: 1 lot moving 1 point = ${cv:g}."),
@@ -576,7 +582,7 @@ def build(src, dst, daily_lim=0.025, dd_lim=0.10):
     block("By side", "J", ["BUY", "SELL"], "Is one direction worse than the other?")
     block("By setup", "K", sorted({r["e"]["comment"] or "" for r in rows}), "Entry comment written by the EA.")
     block("By exit reason", "T", ["Take profit", "Initial stop loss", "Breakeven stop", "Moved stop (loss side)",
-                                  "Closed by EA"],
+                                  "Closed by EA (guard)"],
           "Breakeven stop = price reached the breakeven trigger, then came back to entry. Small losses there are slippage/commission.")
     block("By weekday (entry)", "H", WEEKDAYS[:5], "Day of the week the trade was entered (server time).")
     block("By entry hour (server)", "I", sorted({r["e"]["time"].hour for r in rows}),

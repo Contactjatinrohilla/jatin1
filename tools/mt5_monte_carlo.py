@@ -179,6 +179,10 @@ def build(src, dst, sims=5000):
     ws["B3"] = (f"{sims:,} simulations per test (prop challenge: {min(sims, 2000):,}), random seed {SEED}. "
                 f"Raw results on 'Sim Data'; the percentiles below are formulas over them.")
     ws["B3"].font = GREY
+    if "pips" in str(info.get("Currency", "")).lower():
+        ws["B4"] = ("WARNING: the test ran with 'Profit in pips' - $ amounts are pip units, not money. The % results "
+                    "on Risk Levels and Prop Challenge use R multiples and are valid.")
+        ws["B4"].font = Font(name=FONT, bold=True, color="C00000")
     ws["B5"], ws["C5"] = "Starting balance", dep
     ws["B6"], ws["C6"] = "Max drawdown limit to test against", 0.10
     for a, f in (("C5", USD), ("C6", PCT)):
@@ -258,7 +262,7 @@ def build(src, dst, sims=5000):
         f"${np.percentile(bs_net, 5):,.0f} (worst 5%) to ${np.percentile(bs_net, 95):,.0f} (best 5%), median "
         f"${np.median(bs_net):,.0f}. Chance of a net loss over the whole period: {loss_p:.1%}.",
         f"3. Losing streaks: expect up to {int(np.percentile(rs_streak, 95))} losses in a row (worst 5%), the backtest had "
-        f"{act_streak}. With a 32% win rate long streaks are normal, not a sign the EA is broken.",
+        f"{act_streak}. With a {(p > 0).mean():.0%} win rate long streaks are normal, not a sign the EA is broken.",
         f"4. Risk per trade: the backtest risked only {act_risk:.2%} per trade. "
         + (f"At {100 * best_risk[0]:.2f}% the median return over the period is {np.median(best_risk[1]):.0%} with a worst-5% "
            f"drawdown of {np.percentile(best_risk[2], 95):.1%} - the highest tested level that stays under 10%. "
