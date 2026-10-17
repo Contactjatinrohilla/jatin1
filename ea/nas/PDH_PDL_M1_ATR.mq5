@@ -11,7 +11,10 @@
 //|     for the day; a later re-cross is never traded.               |
 //|  3. Enters at market. SL / TP = ATR x multiplier (ATR timeframe  |
 //|     is an input, M5 by default - M1 ATR is too noisy).           |
-//|     Optional breakeven and a daily time exit.                    |
+//|     Optional breakeven (with a small locked profit), trailing    |
+//|     stop (ATR or R distance) and a daily time exit. 1 R is always |
+//|     the trade's INITIAL SL distance, read from the opening order, |
+//|     so it survives SL moves and EA restarts.                     |
 //|  4. Watches account equity on every tick. If the account loses   |
 //|     2.5% today or 8.5% this week, it closes all this EA's trades |
 //|     and stops trading until the next day / week. This is shared |
@@ -20,7 +23,7 @@
 //|     the EA's other trades still fits inside the limit.           |
 //|  5. Lot size is cut to what free margin can hold.                |
 //+------------------------------------------------------------------+
-#property version   "2.00"
+#property version   "2.10"
 #property description "PDH/PDL breakout, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
@@ -29,6 +32,12 @@ enum ENUM_LOT_MODE
   {
    LOT_FIXED        = 0, // Fixed lots
    LOT_RISK_PERCENT = 1  // % of equity risked per trade
+  };
+
+enum ENUM_TRAIL_MODE
+  {
+   TRAIL_ATR = 0, // Distance = current ATR x TrailDistATR
+   TRAIL_R   = 1  // Distance = initial SL distance x TrailDistR
   };
 
 //--- Inputs ---------------------------------------------------------
@@ -45,6 +54,14 @@ input double ATR_TP_Mult      = 4.0;    // TP distance = ATR x this
 input group "=== Trade Management ==="
 input bool   UseBreakeven     = false;  // Move SL to entry once in profit
 input double BreakevenAtR     = 1.0;    // ... at this many R (1 R = SL distance)
+input double BreakevenLockR   = 0.0;    // ... SL goes this many R past entry (0 = exactly entry, 0.1 = lock +0.1 R)
+input bool   UseTrailing      = false;  // Trailing stop
+input double TrailStartR      = 1.5;    // ... starts once profit reaches this many R
+input ENUM_TRAIL_MODE TrailMode = TRAIL_ATR; // ... distance measured in
+input double TrailDistATR     = 1.0;    // ... distance = ATR x this (ATR mode)
+input double TrailDistR       = 1.0;    // ... distance = this many R (R mode)
+input int    TrailStepPoints  = 10;     // ... move the SL only when it improves by at least this (points)
+input bool   TrailRemoveTP    = false;  // ... remove the TP once trailing starts (let winners run)
 input bool   UseTimeExit      = false;  // Close trades + stop entries at the time below (no overnight / weekend holds)
 input int    ExitHour         = 22;     // Exit hour (server time)
 input int    ExitMinute       = 45;     // Exit minute
@@ -78,6 +95,9 @@ double   riskRoom    = 0;      // money left before the nearest loss cap
 bool     haltLogged  = false;
 datetime lastCloseFail = 0;    // throttles close retries / log lines
 string   gvPrefix;             // shared-variable prefix for this account
+ulong    riskTicket[];         // cache: position id -> initial SL distance (1 R)
+double   riskDist[];
+datetime lastManageLog = 0;    // throttles SL-move log lines
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -94,6 +114,11 @@ int OnInit()
      { Print("MaxMarginUsePct must be 1-100."); return INIT_PARAMETERS_INCORRECT; }
    if(UseBreakeven && BreakevenAtR <= 0)
      { Print("BreakevenAtR must be above 0."); return INIT_PARAMETERS_INCORRECT; }
+   if(UseBreakeven && (BreakevenLockR < 0 || BreakevenLockR >= BreakevenAtR))
+     { Print("BreakevenLockR must be 0 or more and below BreakevenAtR."); return INIT_PARAMETERS_INCORRECT; }
+   if(UseTrailing && (TrailStartR <= 0 || TrailStepPoints < 0 ||
+                      (TrailMode == TRAIL_ATR && TrailDistATR <= 0) || (TrailMode == TRAIL_R && TrailDistR <= 0)))
+     { Print("Invalid trailing settings."); return INIT_PARAMETERS_INCORRECT; }
    if(ExitHour < 0 || ExitHour > 23 || ExitMinute < 0 || ExitMinute > 59)
      { Print("Invalid exit time."); return INIT_PARAMETERS_INCORRECT; }
    if(SessionStartHour < 0 || SessionStartHour > 23 || SessionEndHour < 0 || SessionEndHour > 24)
@@ -133,7 +158,7 @@ void OnTick()
       return;
      }
 
-   //--- 2) Time exit and breakeven: every tick
+   //--- 2) Time exit, breakeven and trailing: every tick
    if(UseTimeExit && PastExitTime())
       ClosePositions(false);                   // this chart's symbol
    else
@@ -269,11 +294,58 @@ bool PastExitTime()
    return t.hour * 60 + t.min >= ExitHour * 60 + ExitMinute;
   }
 
-// Breakeven for this chart's position (SL moves once, when it is still behind entry).
+// 1 R of a position = its INITIAL SL distance, taken from the order that opened it
+// (the current SL may already have been moved). Cached per position; 0 = unknown.
+double InitialRisk(const ulong posId, const double open)
+  {
+   for(int i = ArraySize(riskTicket) - 1; i >= 0; i--)
+      if(riskTicket[i] == posId) return riskDist[i];
+
+   double dist = 0;
+   if(HistorySelectByPosition(posId))
+     {
+      datetime first = 0;
+      for(int i = HistoryOrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong o = HistoryOrderGetTicket(i);
+         if(o == 0) continue;
+         datetime t  = (datetime)HistoryOrderGetInteger(o, ORDER_TIME_SETUP);
+         double   sl = HistoryOrderGetDouble(o, ORDER_SL);
+         if(sl > 0 && (first == 0 || t < first)) { first = t; dist = MathAbs(open - sl); }
+        }
+     }
+   if(dist <= 0) return 0;                                      // not found: do not cache, try again later
+
+   if(ArraySize(riskTicket) > 200) { ArrayResize(riskTicket, 0); ArrayResize(riskDist, 0); }
+   int n = ArraySize(riskTicket);
+   ArrayResize(riskTicket, n + 1);
+   ArrayResize(riskDist, n + 1);
+   riskTicket[n] = posId;
+   riskDist[n]   = dist;
+   return dist;
+  }
+
+void ManageLog(const string msg)
+  {
+   if(TimeCurrent() - lastManageLog < 60) return;              // at most one line a minute
+   lastManageLog = TimeCurrent();
+   Print(msg);
+  }
+
+// Breakeven and trailing for this chart's positions. The SL only ever moves in the trade's favour.
 void ManagePositions()
   {
-   if(!UseBreakeven) return;
-   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(!UseBreakeven && !UseTrailing) return;
+   double stopsLvl  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double freezeLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+   double step      = MathMax(TrailStepPoints, 1) * _Point;
+
+   double atrNow = 0;
+   if(UseTrailing && TrailMode == TRAIL_ATR)
+     {
+      double atr[];
+      if(CopyBuffer(atrHandle, 0, 1, 1, atr) == 1) atrNow = atr[0];
+     }
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -288,17 +360,57 @@ void ManagePositions()
       double tp    = PositionGetDouble(POSITION_TP);
       if(sl <= 0) continue;
 
-      double risk = isBuy ? open - sl : sl - open;
-      if(risk <= 0) continue;                                    // already at / past breakeven
+      double R = InitialRisk((ulong)PositionGetInteger(POSITION_IDENTIFIER), open);
+      if(R <= 0) { ManageLog(StringFormat("#%I64u: initial SL not found in history - breakeven/trailing skipped", ticket)); continue; }
 
       double px     = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double profit = isBuy ? px - open : open - px;
-      if(profit < risk * BreakevenAtR) continue;
+      double dir    = isBuy ? 1.0 : -1.0;
 
-      double newSl = NormalizeDouble(open, _Digits);
-      bool   legal = isBuy ? newSl < px - minDist : newSl > px + minDist;
-      if(legal && !trade.PositionModify(ticket, newSl, tp))
-         Print("Breakeven failed for #", ticket, " retcode ", trade.ResultRetcode());
+      //--- candidate stops (in price); the best one for the trade wins
+      double newSl  = sl;
+      bool   isTrail = false;
+      if(UseBreakeven && profit >= R * BreakevenAtR)
+        {
+         double be = open + dir * R * BreakevenLockR;
+         if(dir * (be - newSl) > 0) newSl = be;
+        }
+      if(UseTrailing && profit >= R * TrailStartR)
+        {
+         double dist = (TrailMode == TRAIL_ATR) ? atrNow * TrailDistATR : R * TrailDistR;
+         if(dist > 0)
+           {
+            double tr = px - dir * dist;
+            if(dir * (tr - newSl) > 0) { newSl = tr; isTrail = true; }
+           }
+        }
+      newSl = NormalizeDouble(newSl, _Digits);
+      double gain = dir * (newSl - sl);
+      if(gain <= 0) continue;                                    // nothing better than the current SL
+      if(isTrail && gain < step) continue;                      // small trailing steps are skipped (fewer modifications)
+
+      //--- broker rules
+      if(dir * (px - newSl) <= stopsLvl)
+        {
+         ManageLog(StringFormat("#%I64u: new SL %s too close to price %s (stops level %s) - waiting",
+                                ticket, DoubleToString(newSl, _Digits), DoubleToString(px, _Digits),
+                                DoubleToString(stopsLvl, _Digits)));
+         continue;
+        }
+      if(freezeLvl > 0 && (MathAbs(px - sl) <= freezeLvl || (tp > 0 && MathAbs(tp - px) <= freezeLvl)))
+        {
+         ManageLog(StringFormat("#%I64u: SL/TP inside the freeze level - SL move skipped", ticket));
+         continue;
+        }
+
+      double newTp = (UseTrailing && TrailRemoveTP && profit >= R * TrailStartR) ? 0.0 : tp;
+      if(trade.PositionModify(ticket, newSl, newTp))
+         Print(isTrail ? "Trailing" : "Breakeven", " #", ticket, ": SL ", DoubleToString(sl, _Digits), " -> ",
+               DoubleToString(newSl, _Digits), " (", DoubleToString(gain / R, 2), " R)",
+               newTp != tp ? " | TP removed" : "");
+      else
+         ManageLog(StringFormat("#%I64u: SL move failed, retcode %u (%s)", ticket, trade.ResultRetcode(),
+                                trade.ResultRetcodeDescription()));
      }
   }
 
