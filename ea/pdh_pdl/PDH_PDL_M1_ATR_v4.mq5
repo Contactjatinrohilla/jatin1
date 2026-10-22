@@ -1,6 +1,17 @@
 //+------------------------------------------------------------------+
 //| PDH_PDL_M1_ATR.mq5   v4.00 - session range breakouts             |
 //|                                                                  |
+//| v4.10 changes (PDH/PDL and session signals unchanged):           |
+//|  A. ICT killzones: Asian, London, New York and London Close.     |
+//|     Each killzone is drawn (box, high/low, labels, arrows) and   |
+//|     traded like a session range: first M1 close beyond the      |
+//|     killzone high / low after it ends, until its trade end.      |
+//|     Own on/off input and chart button for every killzone.        |
+//|  B. KillzoneEntriesOnly: every strategy may only open trades     |
+//|     while price is inside one of the killzones.                  |
+//|  C. Magic numbers now MagicNumber + 0..7 (4 Asia KZ, 5 London KZ,|
+//|     6 New York KZ, 7 London Close KZ). Keep +1..+7 free.         |
+//|                                                                  |
 //| v4.00 changes (PDH/PDL signals unchanged):                       |
 //|  A. Three new strategies: Asian, London and New York session     |
 //|     range breakouts. Each session builds a high/low range        |
@@ -59,8 +70,8 @@
 //|     R, live P/L at price, info panel, on/off buttons. Drawing    |
 //|     only - the trading logic does not depend on it.              |
 //+------------------------------------------------------------------+
-#property version   "4.00"
-#property description "PDH/PDL + Asia/London/New York range breakouts, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
+#property version   "4.10"
+#property description "PDH/PDL + Asia/London/New York session and killzone range breakouts, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
 
@@ -97,6 +108,10 @@ input bool   UsePDHPDL        = true;   // PDH/PDL breakout
 input bool   UseAsia          = true;   // Asian session range breakout
 input bool   UseLondon        = true;   // London session range breakout
 input bool   UseNewYork       = true;   // New York session range breakout
+input bool   UseAsiaKZ        = true;   // Asian killzone breakout
+input bool   UseLondonKZ      = true;   // London killzone breakout
+input bool   UseNewYorkKZ     = true;   // New York killzone breakout
+input bool   UseLondonCloseKZ = true;   // London Close killzone breakout
 input bool   OneTradeAtATime  = true;   // Only one open trade per chart (false = one per strategy)
 
 input group "=== Entry (PDH/PDL) ==="
@@ -121,6 +136,26 @@ input double SessionTP_R      = 2.0;    // ... TP = SL distance x this (range / 
 input int    SessionSLBufferPoints = 0; // ... SL this many points beyond the range level (range / middle modes)
 input int    MinRangePoints   = 0;      // Skip a session whose range is smaller (points, 0 = off)
 input int    MaxRangePoints   = 0;      // Skip a session whose range is larger (points, 0 = off)
+
+input group "=== Killzones (server time, HH:MM - defaults = ICT times for a GMT+2/+3 server) ==="
+input string AsiaKZStart      = "03:00"; // Asian KZ: start (20:00 New York)
+input string AsiaKZEnd        = "07:00"; // Asian KZ: end (breakouts traded from here)
+input string AsiaKZTradeEnd   = "12:00"; // Asian KZ: breakouts traded until
+input ENUM_SESS_DIR AsiaKZDirection = DIR_BOTH; // Asian KZ: direction
+input string LondonKZStart    = "09:00"; // London KZ: start (02:00 New York)
+input string LondonKZEnd      = "12:00"; // London KZ: end (breakouts traded from here)
+input string LondonKZTradeEnd = "16:00"; // London KZ: breakouts traded until
+input ENUM_SESS_DIR LondonKZDirection = DIR_BOTH; // London KZ: direction
+input string NYKZStart        = "14:00"; // New York KZ: start (07:00 New York)
+input string NYKZEnd          = "17:00"; // New York KZ: end (breakouts traded from here)
+input string NYKZTradeEnd     = "21:00"; // New York KZ: breakouts traded until
+input ENUM_SESS_DIR NYKZDirection = DIR_BOTH; // New York KZ: direction
+input string LondonCloseKZStart    = "17:00"; // London Close KZ: start (10:00 New York)
+input string LondonCloseKZEnd      = "19:00"; // London Close KZ: end (breakouts traded from here)
+input string LondonCloseKZTradeEnd = "22:00"; // London Close KZ: breakouts traded until
+input ENUM_SESS_DIR LondonCloseKZDirection = DIR_BOTH; // London Close KZ: direction
+input bool   KillzoneEntriesOnly = false; // All strategies: only open trades INSIDE a killzone (start-end)
+                                          // (SL mode, TP, buffer and range size filters above apply to killzones too)
 
 input group "=== Stop Loss / Take Profit (ATR) ==="
 input ENUM_TIMEFRAMES ATR_Timeframe = PERIOD_M5; // ATR timeframe (v1 used M1)
@@ -159,7 +194,7 @@ input int    SessionStartHour = 8;      // Trading hours start (server time)
 input int    SessionEndHour   = 17;     // Trading hours end (server time)
 
 input group "=== Execution ==="
-input long   MagicNumber      = 260514; // Magic number (strategies use this +0..+3; same on all charts)
+input long   MagicNumber      = 260514; // Magic number (strategies use this +0..+7; same on all charts)
 input int    SlippagePoints   = 30;     // Max slippage (points)
 
 input group "=== Chart Display ==="
@@ -181,13 +216,27 @@ input bool   SessionBoxFill   = true;   // ... filled boxes (false = outline)
 input color  ColAsia          = clrMediumPurple; // ... Asia colour
 input color  ColLondon        = clrMediumSeaGreen; // ... London colour
 input color  ColNewYork       = clrTomato;       // ... New York colour
+input bool   DrawAsiaKZ       = true;   // ... draw Asian killzone (box, high/low, labels)
+input bool   DrawLondonKZ     = true;   // ... draw London killzone
+input bool   DrawNewYorkKZ    = true;   // ... draw New York killzone
+input bool   DrawLondonCloseKZ = true;  // ... draw London Close killzone
+input bool   KillzoneBoxFill  = false;  // ... filled killzone boxes (false = outline, sits over the session boxes)
+input color  ColAsiaKZ        = clrViolet;       // ... Asian KZ colour
+input color  ColLondonKZ      = clrDeepSkyBlue;  // ... London KZ colour
+input color  ColNewYorkKZ     = clrGold;         // ... New York KZ colour
+input color  ColLondonCloseKZ = clrSandyBrown;   // ... London Close KZ colour
 
 //--- Strategies -----------------------------------------------------
-#define NSTRAT    4
-#define ST_PDH    0
-#define ST_ASIA   1
-#define ST_LONDON 2
-#define ST_NY     3
+#define NSTRAT      8
+#define ST_PDH      0
+#define ST_ASIA     1
+#define ST_LONDON   2
+#define ST_NY       3
+#define ST_ASIAKZ   4
+#define ST_LONDONKZ 5
+#define ST_NYKZ     6
+#define ST_LCKZ     7
+#define ST_FIRSTKZ  ST_ASIAKZ
 
 struct SessWin   { datetime rs; datetime re; datetime te; };   // range start, range end, trade end
 struct SessBreak { bool up; bool dn; datetime upT; datetime dnT; double upP; double dnP; };
@@ -196,6 +245,7 @@ bool          stratOn[NSTRAT];         // live on/off (inputs, then the chart bu
 int           sessStart[NSTRAT], sessEnd[NSTRAT], sessTradeEnd[NSTRAT];   // minutes of the day
 ENUM_SESS_DIR sessDir[NSTRAT];
 bool          sessDraw[NSTRAT];
+bool          sessFill[NSTRAT];
 color         sessCol[NSTRAT];
 string        sessText[NSTRAT];        // panel row per session (refreshed once per M1 bar)
 
@@ -207,6 +257,10 @@ string StratName(const int s)
       case ST_ASIA:   return "Asia";
       case ST_LONDON: return "London";
       case ST_NY:     return "New York";
+      case ST_ASIAKZ:   return "Asia KZ";
+      case ST_LONDONKZ: return "London KZ";
+      case ST_NYKZ:     return "NY KZ";
+      case ST_LCKZ:     return "LdnClose KZ";
      }
    return "?";
   }
@@ -263,9 +317,14 @@ int OnInit()
    if(SessionSLBufferPoints < 0 || MinRangePoints < 0 || MaxRangePoints < 0
       || (MaxRangePoints > 0 && MaxRangePoints < MinRangePoints))
      { Print("Invalid session buffer / range size filter."); return INIT_PARAMETERS_INCORRECT; }
-   if(!LoadSession(ST_ASIA,   AsiaRangeStart,   AsiaRangeEnd,   AsiaTradeEnd,   AsiaDirection,   DrawAsia,    ColAsia)    ||
-      !LoadSession(ST_LONDON, LondonRangeStart, LondonRangeEnd, LondonTradeEnd, LondonDirection, DrawLondon,  ColLondon)  ||
-      !LoadSession(ST_NY,     NYRangeStart,     NYRangeEnd,     NYTradeEnd,     NYDirection,     DrawNewYork, ColNewYork))
+   if(!LoadSession(ST_ASIA,   AsiaRangeStart,   AsiaRangeEnd,   AsiaTradeEnd,   AsiaDirection,   DrawAsia,    ColAsia,    SessionBoxFill) ||
+      !LoadSession(ST_LONDON, LondonRangeStart, LondonRangeEnd, LondonTradeEnd, LondonDirection, DrawLondon,  ColLondon,  SessionBoxFill) ||
+      !LoadSession(ST_NY,     NYRangeStart,     NYRangeEnd,     NYTradeEnd,     NYDirection,     DrawNewYork, ColNewYork, SessionBoxFill) ||
+      !LoadSession(ST_ASIAKZ,   AsiaKZStart,   AsiaKZEnd,   AsiaKZTradeEnd,   AsiaKZDirection,   DrawAsiaKZ,   ColAsiaKZ,   KillzoneBoxFill) ||
+      !LoadSession(ST_LONDONKZ, LondonKZStart, LondonKZEnd, LondonKZTradeEnd, LondonKZDirection, DrawLondonKZ, ColLondonKZ, KillzoneBoxFill) ||
+      !LoadSession(ST_NYKZ,     NYKZStart,     NYKZEnd,     NYKZTradeEnd,     NYKZDirection,     DrawNewYorkKZ, ColNewYorkKZ, KillzoneBoxFill) ||
+      !LoadSession(ST_LCKZ, LondonCloseKZStart, LondonCloseKZEnd, LondonCloseKZTradeEnd, LondonCloseKZDirection,
+                   DrawLondonCloseKZ, ColLondonCloseKZ, KillzoneBoxFill))
       return INIT_PARAMETERS_INCORRECT;
 
    atrHandle = iATR(_Symbol, ATR_Timeframe, ATR_Period);
@@ -287,14 +346,20 @@ int OnInit()
    stratOn[ST_ASIA]   = UseAsia;
    stratOn[ST_LONDON] = UseLondon;
    stratOn[ST_NY]     = UseNewYork;
+   stratOn[ST_ASIAKZ]   = UseAsiaKZ;
+   stratOn[ST_LONDONKZ] = UseLondonKZ;
+   stratOn[ST_NYKZ]     = UseNewYorkKZ;
+   stratOn[ST_LCKZ]     = UseLondonCloseKZ;
    bool useInputs = MQLInfoInteger(MQL_TESTER) || UninitializeReason() == REASON_PARAMETERS;
    for(int s = 0; s < NSTRAT; s++)
      {
       if(useInputs) GlobalVariableDel(BtnKey(s));
       else if(GlobalVariableCheck(BtnKey(s))) stratOn[s] = GlobalVariableGet(BtnKey(s)) > 0.5;
      }
-   PrintFormat("Strategies: PDH/PDL %s | Asia %s | London %s | New York %s",
-               stratOn[0] ? "ON" : "OFF", stratOn[1] ? "ON" : "OFF", stratOn[2] ? "ON" : "OFF", stratOn[3] ? "ON" : "OFF");
+   string names = "";
+   for(int s = 0; s < NSTRAT; s++)
+      names += (s > 0 ? " | " : "") + StratName(s) + (stratOn[s] ? " ON" : " OFF");
+   Print("Strategies: ", names, KillzoneEntriesOnly ? "  (entries only inside killzones)" : "");
 
    initBalance = (InitialBalance > 0) ? InitialBalance : AccountInfoDouble(ACCOUNT_BALANCE);
    if(LotMode == LOT_RISK_PERCENT && RiskBase == RISK_BASE_INITIAL && InitialBalance <= 0
@@ -309,7 +374,7 @@ int OnInit()
 
 // Reads one session's times ("HH:MM") into the session arrays.
 bool LoadSession(const int s, const string start, const string end, const string tradeEnd,
-                 const ENUM_SESS_DIR dir, const bool draw, const color clr)
+                 const ENUM_SESS_DIR dir, const bool draw, const color clr, const bool fill)
   {
    int a = ParseHM(start), b = ParseHM(end), c = ParseHM(tradeEnd);
    if(a < 0 || a >= 1440 || b <= 0 || c <= 0 || a == b % 1440 || b % 1440 == c % 1440)
@@ -319,7 +384,7 @@ bool LoadSession(const int s, const string start, const string end, const string
       return false;
      }
    sessStart[s] = a; sessEnd[s] = b; sessTradeEnd[s] = c;
-   sessDir[s] = dir; sessDraw[s] = draw; sessCol[s] = clr;
+   sessDir[s] = dir; sessDraw[s] = draw; sessCol[s] = clr; sessFill[s] = fill;
    sessText[s] = "";
    return true;
   }
@@ -786,7 +851,20 @@ bool FiltersPass(const string side)
                        : (t.hour >= SessionStartHour || t.hour < SessionEndHour);
       if(!inSession) { Print(side, " signal skipped: outside trading hours."); return false; }
      }
+   if(KillzoneEntriesOnly && !InKillzone(TimeCurrent()))
+     { Print(side, " signal skipped: not inside a killzone."); return false; }
    return true;
+  }
+
+// true while `t` is between the start and end of any killzone (on or off - the times are what count).
+bool InKillzone(const datetime t)
+  {
+   for(int s = ST_FIRSTKZ; s < NSTRAT; s++)
+     {
+      SessWin w;
+      if(LatestWindow(s, t, w) && t < w.re) return true;
+     }
+   return false;
   }
 
 //====================================================================
@@ -1133,12 +1211,12 @@ void DrawButtons(const int y)
          ObjectSetInteger(0, nm, OBJPROP_COLOR, clrWhite);
          ObjectSetInteger(0, nm, OBJPROP_BORDER_COLOR, clrDimGray);
         }
-      ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, 10 + s * (w + 4));
-      ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, 10 + (s % 4) * (w + 4));   // row 1: PDH + sessions, row 2: killzones
+      ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y + (s / 4) * (h + 4));
       ObjectSetInteger(0, nm, OBJPROP_XSIZE, w);
       ObjectSetInteger(0, nm, OBJPROP_YSIZE, h);
       ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, FontSize);
-      ObjectSetString (0, nm, OBJPROP_TEXT, (s == ST_NY ? "NY" : StratName(s)) + (stratOn[s] ? ": ON" : ": OFF"));
+      ObjectSetString (0, nm, OBJPROP_TEXT, (s == ST_NY ? "NY" : s == ST_LCKZ ? "LC KZ" : s == ST_LONDONKZ ? "Ldn KZ" : StratName(s)) + (stratOn[s] ? ": ON" : ": OFF"));
       ObjectSetInteger(0, nm, OBJPROP_BGCOLOR, stratOn[s] ? C'0,110,0' : C'130,0,0');
       ObjectSetInteger(0, nm, OBJPROP_STATE, false);
       ObjectSetString (0, nm, OBJPROP_TOOLTIP, "Click to switch " + StratName(s) + " entries on / off");
@@ -1148,7 +1226,7 @@ void DrawButtons(const int y)
 // Panel text of the session's latest window: times, range, breakout status.
 string SessPanelText(const int s, const datetime now)
   {
-   string hdr = StringFormat("%-8s %-3s %s-%s >%s", StratName(s), stratOn[s] ? "ON" : "OFF",
+   string hdr = StringFormat("%-11s %-3s %s-%s >%s", StratName(s), stratOn[s] ? "ON" : "OFF",
                              HM(sessStart[s]), HM(sessEnd[s]), HM(sessTradeEnd[s]));
    SessWin w;
    double hi, lo;
@@ -1181,8 +1259,8 @@ void DrawSessionWindow(const int s, const int k, const SessWin &w, const double 
    string bx = OBJ + id + "box";
    ObjectCreate(0, bx, OBJ_RECTANGLE, 0, w.rs, hi, forming ? now : w.re, lo);
    color bg = (color)ChartGetInteger(0, CHART_COLOR_BACKGROUND);
-   ObjectSetInteger(0, bx, OBJPROP_COLOR, SessionBoxFill ? Blend(c, bg, 0.25) : c);
-   ObjectSetInteger(0, bx, OBJPROP_FILL, SessionBoxFill);
+   ObjectSetInteger(0, bx, OBJPROP_COLOR, sessFill[s] ? Blend(c, bg, 0.25) : c);
+   ObjectSetInteger(0, bx, OBJPROP_FILL, sessFill[s]);
    ObjectSetInteger(0, bx, OBJPROP_BACK, true);
    ObjectSetInteger(0, bx, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetInteger(0, bx, OBJPROP_WIDTH, 1);
@@ -1378,9 +1456,9 @@ void UpdateChart()
       if(CopyBuffer(atrHandle, 0, 1, 1, atr) == 1)
          atrTxt = StringFormat("%s  (SL %s / TP %s)", DoubleToString(atr[0], _Digits),
                                DoubleToString(atr[0] * ATR_SL_Mult, _Digits), DoubleToString(atr[0] * ATR_TP_Mult, _Digits));
-      PanelLine(row++, StringFormat("PDH/PDL + Sessions M1 ATR  |  %s  |  spread %d pts", _Symbol,
+      PanelLine(row++, StringFormat("PDH/PDL + Sessions + Killzones  |  %s  |  spread %d pts", _Symbol,
                                     (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)), ColPanel);
-      PanelLine(row++, StringFormat("%-8s %-3s PDH %s %s   PDL %s %s", StratName(ST_PDH), stratOn[ST_PDH] ? "ON" : "OFF",
+      PanelLine(row++, StringFormat("%-11s %-3s PDH %s %s   PDL %s %s", StratName(ST_PDH), stratOn[ST_PDH] ? "ON" : "OFF",
                                     DoubleToString(pdh, _Digits), pdhBrokenToday ? "(broken)" : "",
                                     DoubleToString(pdl, _Digits), pdlBrokenToday ? "(broken)" : ""), ColPanel);
       for(int s = ST_ASIA; s < NSTRAT; s++)
