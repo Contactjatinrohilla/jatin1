@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| PDH_PDL_M1_ATR.mq5   v5.00 - killzone high/low like PDH/PDL      |
+//| PDH_PDL_M1_ATR.mq5   v5.10 - killzone high/low like PDH/PDL      |
 //|                                                                  |
 //| v5.10 changes (signals unchanged):                               |
 //|  A. Indian time: KZClock = India (IST) lets you type the         |
@@ -943,7 +943,8 @@ bool PrintSymbolCheck()
    double byCalc = MoneyAtRisk(_Symbol, 1.0, one);
    double byTick = MoneyAtRiskTickValue(_Symbol, 1.0, one);
    double marginPerLot = 0;
-   OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, 1.0, SymbolInfoDouble(_Symbol, SYMBOL_ASK), marginPerLot);
+   if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, 1.0, SymbolInfoDouble(_Symbol, SYMBOL_ASK), marginPerLot))
+      marginPerLot = 0;                                                // unknown: margin lines below are skipped
    double notional = byCalc * px;
    PrintFormat("SYMBOL CHECK %s | money per 1.00 point per 1.00 lot: %.4f (P/L calc) vs %.4f (tick value)%s",
                _Symbol, byCalc, byTick,
