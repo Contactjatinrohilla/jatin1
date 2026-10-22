@@ -1,6 +1,13 @@
 //+------------------------------------------------------------------+
 //| PDH_PDL_M1_ATR.mq5   v5.00 - killzone high/low like PDH/PDL      |
 //|                                                                  |
+//| v5.10 changes (signals unchanged):                               |
+//|  A. Indian time: KZClock = India (IST) lets you type the         |
+//|     killzone times in IST; the EA converts them to server time   |
+//|     (server GMT offset: auto, or set it by hand).                |
+//|  B. Panel shows server time and IST, and every killzone's times  |
+//|     in both clocks; box tooltips too.                            |
+//|                                                                  |
 //| v5.00 changes (PDH/PDL signals unchanged):                       |
 //|  A. Session killzones: Asian, London, New York (+ optional       |
 //|     London Close). Each killzone's HIGH and LOW are traded       |
@@ -62,7 +69,7 @@
 //|     R, live P/L at price, info panel, on/off buttons. Drawing    |
 //|     only - the trading logic does not depend on it.              |
 //+------------------------------------------------------------------+
-#property version   "5.00"
+#property version   "5.10"
 #property description "PDH/PDL + Asia/London/New York killzone high/low breakouts, first M1 close confirmation, ATR SL/TP, daily & weekly loss caps"
 
 #include <Trade/Trade.mqh>
@@ -87,6 +94,12 @@ enum ENUM_SESS_DIR
    DIR_SELLS = 2  // Sells only
   };
 
+enum ENUM_KZ_CLOCK
+  {
+   KZ_CLOCK_SERVER = 0, // Server (broker) time
+   KZ_CLOCK_IST    = 1  // India time (IST, GMT+5:30)
+  };
+
 enum ENUM_SESS_SL
   {
    SESS_SL_ATR   = 0, // ATR x multiplier (same as PDH/PDL)
@@ -107,22 +120,25 @@ input group "=== Entry (PDH/PDL) ==="
 input bool   TradeBuys        = true;   // Buy on first M1 close above PDH
 input bool   TradeSells       = true;   // Sell on first M1 close below PDL
 
-input group "=== Killzones (server time, HH:MM - defaults = ICT times for a GMT+2/+3 server) ==="
-input string AsiaKZStart      = "03:00"; // Asian KZ: start (20:00 New York)
-input string AsiaKZEnd        = "07:00"; // Asian KZ: end (its high/low are traded from here)
-input string AsiaKZTradeEnd   = "24:00"; // Asian KZ: high/low traded until (24:00 = rest of the day, like PDH/PDL)
+input group "=== Killzones (HH:MM - defaults = ICT times in server time of a GMT+2/+3 broker) ==="
+input ENUM_KZ_CLOCK KZClock   = KZ_CLOCK_SERVER; // Killzone times below are in (India: see IST in each comment)
+input bool   AutoServerOffset = true;   // Server GMT offset auto (live: from terminal; tester: GMT+2, GMT+3 in US summer time)
+input double ServerGMTOffset  = 2.0;    // ... server GMT offset in hours when auto is off
+input string AsiaKZStart      = "03:00"; // Asian KZ: start (20:00 New York = IST 05:30 Mar-Nov / 06:30 Nov-Mar)
+input string AsiaKZEnd        = "07:00"; // Asian KZ: end (IST 09:30 / 10:30) - its high/low are traded from here
+input string AsiaKZTradeEnd   = "24:00"; // Asian KZ: high/low traded until (24:00 = end of the day in the clock above)
 input ENUM_SESS_DIR AsiaKZDirection = DIR_BOTH; // Asian KZ: direction
-input string LondonKZStart    = "09:00"; // London KZ: start (02:00 New York)
-input string LondonKZEnd      = "12:00"; // London KZ: end (its high/low are traded from here)
-input string LondonKZTradeEnd = "24:00"; // London KZ: high/low traded until (24:00 = rest of the day, like PDH/PDL)
+input string LondonKZStart    = "09:00"; // London KZ: start (02:00 New York = IST 11:30 Mar-Nov / 12:30 Nov-Mar)
+input string LondonKZEnd      = "12:00"; // London KZ: end (IST 14:30 / 15:30) - its high/low are traded from here
+input string LondonKZTradeEnd = "24:00"; // London KZ: high/low traded until (24:00 = end of the day in the clock above)
 input ENUM_SESS_DIR LondonKZDirection = DIR_BOTH; // London KZ: direction
-input string NYKZStart        = "14:00"; // New York KZ: start (07:00 New York)
-input string NYKZEnd          = "17:00"; // New York KZ: end (its high/low are traded from here)
-input string NYKZTradeEnd     = "24:00"; // New York KZ: high/low traded until (24:00 = rest of the day, like PDH/PDL)
+input string NYKZStart        = "14:00"; // New York KZ: start (07:00 New York = IST 16:30 Mar-Nov / 17:30 Nov-Mar)
+input string NYKZEnd          = "17:00"; // New York KZ: end (IST 19:30 / 20:30) - its high/low are traded from here
+input string NYKZTradeEnd     = "24:00"; // New York KZ: high/low traded until (24:00 = end of the day in the clock above)
 input ENUM_SESS_DIR NYKZDirection = DIR_BOTH; // New York KZ: direction
-input string LondonCloseKZStart    = "17:00"; // London Close KZ: start (10:00 New York)
-input string LondonCloseKZEnd      = "19:00"; // London Close KZ: end (its high/low are traded from here)
-input string LondonCloseKZTradeEnd = "24:00"; // London Close KZ: high/low traded until (24:00 = rest of the day, like PDH/PDL)
+input string LondonCloseKZStart    = "17:00"; // London Close KZ: start (10:00 New York = IST 19:30 Mar-Nov / 20:30 Nov-Mar)
+input string LondonCloseKZEnd      = "19:00"; // London Close KZ: end (IST 21:30 / 22:30) - its high/low are traded from here
+input string LondonCloseKZTradeEnd = "24:00"; // London Close KZ: high/low traded until (24:00 = end of the day in the clock above)
 input ENUM_SESS_DIR LondonCloseKZDirection = DIR_BOTH; // London Close KZ: direction
 input ENUM_SESS_SL KZ_SLMode  = SESS_SL_ATR; // Killzone trades: stop loss at (ATR = same as PDH/PDL)
 input double KZ_TP_R          = 2.0;    // ... TP = SL distance x this (other side / middle modes)
@@ -276,6 +292,11 @@ int OnInit()
      { Print("Invalid exit time."); return INIT_PARAMETERS_INCORRECT; }
    if(SessionStartHour < 0 || SessionStartHour > 23 || SessionEndHour < 0 || SessionEndHour > 24)
      { Print("Invalid session hours."); return INIT_PARAMETERS_INCORRECT; }
+   if(!AutoServerOffset && (ServerGMTOffset < -12 || ServerGMTOffset > 14))
+     { Print("ServerGMTOffset must be -12 to +14 hours."); return INIT_PARAMETERS_INCORRECT; }
+   if(KZClock == KZ_CLOCK_IST)
+      PrintFormat("Killzone times are India time (IST). Server is GMT%+.1f now: IST = server %+d min.",
+                  ServerOffsetMin(TimeCurrent()) / 60.0, ClockShiftMin(TimeCurrent()));
    if(KZ_SLMode != SESS_SL_ATR && KZ_TP_R <= 0)
      { Print("KZ_TP_R must be above 0."); return INIT_PARAMETERS_INCORRECT; }
    if(KZ_SLBufferPoints < 0 || MinRangePoints < 0 || MaxRangePoints < 0
@@ -367,6 +388,17 @@ int ParseHM(const string text)
   }
 
 string HM(const int minutes) { return StringFormat("%02d:%02d", minutes / 60, minutes % 60); }
+
+// Killzone start-end in both clocks, e.g. "03:00-07:00 srv = 05:30-09:30 IST".
+string KZTimes(const int s, const datetime now)
+  {
+   int off   = ServerOffsetMin(now);
+   int toIst = (KZClock == KZ_CLOCK_IST) ? 0 : 330 - off;     // killzone clock -> IST
+   int toSrv = (KZClock == KZ_CLOCK_IST) ? off - 330 : 0;     // killzone clock -> server
+   return StringFormat("%s-%s srv = %s-%s IST",
+                       HM((sessStart[s] + toSrv + 2880) % 1440), HM((sessEnd[s] + toSrv + 2880) % 1440),
+                       HM((sessStart[s] + toIst + 2880) % 1440), HM((sessEnd[s] + toIst + 2880) % 1440));
+  }
 
 string BtnKey(const int s) { return "PDHPDL_btn_" + IntegerToString(ChartID()) + "_" + IntegerToString(s); }
 
@@ -668,10 +700,50 @@ void CheckForEntry()
              buySignal ? "PDH breakout" : "PDL breakout");
   }
 
+//--- Clocks ---------------------------------------------------------
+// true between the 2nd Sunday of March and the 1st Sunday of November (US summer time).
+bool UsSummerTime(const datetime t)
+  {
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   MqlDateTime m;
+   m.year = d.year; m.hour = 0; m.min = 0; m.sec = 0; m.day = 1;
+   m.mon = 3;  TimeToStruct(StructToTime(m), m);
+   int startDay = 1 + (7 - m.day_of_week) % 7 + 7;           // 2nd Sunday of March
+   m.mon = 11; m.day = 1; m.hour = 0; m.min = 0; m.sec = 0;
+   TimeToStruct(StructToTime(m), m);
+   int endDay = 1 + (7 - m.day_of_week) % 7;                 // 1st Sunday of November
+   int md = d.mon * 100 + d.day;
+   return md >= 300 + startDay && md < 1100 + endDay;
+  }
+
+// Server GMT offset in minutes. Live: from the terminal. Tester (whose GMT clock is not real):
+// GMT+2, GMT+3 in US summer time - the usual MT5 broker server.
+int ServerOffsetMin(const datetime t)
+  {
+   if(!AutoServerOffset) return (int)MathRound(ServerGMTOffset * 60);
+   if(!MQLInfoInteger(MQL_TESTER))
+      return (int)(MathRound((double)(TimeTradeServer() - TimeGMT()) / 1800.0) * 30);
+   return UsSummerTime(t) ? 180 : 120;
+  }
+
+// Minutes to add to server time to get the killzone clock (0 when the times are server time).
+int ClockShiftMin(const datetime t)
+  {
+   return KZClock == KZ_CLOCK_IST ? 330 - ServerOffsetMin(t) : 0;
+  }
+
+// Day start (00:00) in the killzone clock, written as a killzone-clock datetime.
+datetime ClockDay(const datetime serverTime)
+  {
+   datetime c = serverTime + ClockShiftMin(serverTime) * 60;
+   return c - (c % 86400);
+  }
+
 //--- Session windows ------------------------------------------------
-// The session that ends its range on server day `anchor` (00:00). A range that starts later
-// in the day than it ends (e.g. 22:00-06:00) began the evening before; a trade end at or
-// before the range end is on the next day.
+// The killzone that ends on killzone-clock day `anchor` (00:00), returned in SERVER time.
+// A killzone that starts later in the day than it ends (e.g. 22:00-02:00) began the evening
+// before; a trade end at or before the killzone end is on the next day.
 void SessWindowFor(const int s, const datetime anchor, SessWin &w)
   {
    w.re = anchor + sessEnd[s] * 60;
@@ -679,12 +751,14 @@ void SessWindowFor(const int s, const datetime anchor, SessWin &w)
    if(sessStart[s] >= sessEnd[s]) w.rs -= 86400;
    w.te = anchor + sessTradeEnd[s] * 60;
    if(sessTradeEnd[s] <= sessEnd[s]) w.te += 86400;
+   int shift = ClockShiftMin(anchor + 43200) * 60;           // clock -> server
+   w.rs -= shift; w.re -= shift; w.te -= shift;
   }
 
 // The latest session whose range started at or before `t`.
 bool LatestWindow(const int s, const datetime t, SessWin &w)
   {
-   datetime day = t - (t % 86400);
+   datetime day = ClockDay(t);
    for(int k = -1; k <= 2; k++)
      {
       SessWindowFor(s, day - k * 86400, w);
@@ -1184,8 +1258,8 @@ void DrawButtons(const int y)
 // Panel text of the session's latest window: times, range, breakout status.
 string SessPanelText(const int s, const datetime now)
   {
-   string hdr = StringFormat("%-11s %-3s %s-%s >%s", StratName(s), stratOn[s] ? "ON" : "OFF",
-                             HM(sessStart[s]), HM(sessEnd[s]), HM(sessTradeEnd[s]));
+   string hdr = StringFormat("%-11s %-3s %s >%s %s", StratName(s), stratOn[s] ? "ON" : "OFF",
+                             KZTimes(s, now), HM(sessTradeEnd[s]), KZClock == KZ_CLOCK_IST ? "IST" : "srv");
    SessWin w;
    double hi, lo;
    if(!LatestWindow(s, now, w) || !SessRange(w, now + 1, hi, lo)) return hdr + " | no data yet";
@@ -1242,8 +1316,8 @@ void DrawSessionWindow(const int s, const int k, const SessWin &w, const double 
    ObjectSetInteger(0, bx, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetInteger(0, bx, OBJPROP_WIDTH, 1);
    ObjectSetInteger(0, bx, OBJPROP_SELECTABLE, false);
-   ObjectSetString (0, bx, OBJPROP_TOOLTIP, StringFormat("%s %s-%s  High %s  Low %s", StratName(s), HM(sessStart[s]),
-                    HM(sessEnd[s]), DoubleToString(hi, _Digits), DoubleToString(lo, _Digits)));
+   ObjectSetString (0, bx, OBJPROP_TOOLTIP, StringFormat("%s %s  High %s  Low %s", StratName(s), KZTimes(s, now),
+                    DoubleToString(hi, _Digits), DoubleToString(lo, _Digits)));
 
    TextAt(id + "name", w.rs, hi, StringFormat("%s %s%s%s", StratName(s), DoubleToString(hi - lo, _Digits),
           forming ? " (running)" : "", tag), c, ANCHOR_LEFT_LOWER);
@@ -1292,7 +1366,7 @@ void DrawSessions(const datetime now, const datetime right)
    for(int s = 0; s < NSTRAT; s++) kzLineId[s] = "";
 
    int days = (int)MathMax(1, KZHistoryDays);
-   datetime day = now - (now % 86400);
+   datetime day = ClockDay(now);
    for(int s = ST_FIRSTKZ; s < NSTRAT; s++)
      {
       sessText[s] = SessPanelText(s, now);
@@ -1440,6 +1514,11 @@ void UpdateChart()
                                DoubleToString(atr[0] * ATR_SL_Mult, _Digits), DoubleToString(atr[0] * ATR_TP_Mult, _Digits));
       PanelLine(row++, StringFormat("PDH/PDL + Killzones M1 ATR  |  %s  |  spread %d pts", _Symbol,
                                     (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)), ColPanel);
+      int offMin = ServerOffsetMin(now);
+      PanelLine(row++, StringFormat("Server %s (GMT%+.1f)  |  India %s IST  |  killzone times in %s",
+                                    TimeToString(now, TIME_MINUTES), offMin / 60.0,
+                                    TimeToString(now + (330 - offMin) * 60, TIME_MINUTES),
+                                    KZClock == KZ_CLOCK_IST ? "IST" : "server time"), ColPanel);
       PanelLine(row++, StringFormat("%-11s %-3s PDH %s %s   PDL %s %s", StratName(ST_PDH), stratOn[ST_PDH] ? "ON" : "OFF",
                                     DoubleToString(pdh, _Digits), pdhBrokenToday ? "(broken)" : "",
                                     DoubleToString(pdl, _Digits), pdlBrokenToday ? "(broken)" : ""), ColPanel);
